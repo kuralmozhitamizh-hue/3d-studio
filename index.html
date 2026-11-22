@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-View 3D Studio — Multi-Angle Photos to 3D & Video</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #181b24;
+      --border: #2a2f3d;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --danger: #ef4444;
+      --success: #10b981;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+    header {
+      height: 50px; background: var(--panel); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 16px;
+    }
+    header h1 { font-size: 16px; font-weight: 700; }
+    header h1 span { color: var(--accent); }
+    .header-actions { display: flex; gap: 10px; }
+
+    .workspace { display: flex; flex: 1; overflow: hidden; }
+    #viewport-container { flex: 1; position: relative; background: radial-gradient(circle at center, #1e2230 0%, #0b0d12 100%); }
+    canvas { display: block; width: 100%; height: 100%; }
+
+    .hud {
+      position: absolute; top: 12px; left: 12px; background: rgba(24, 27, 36, 0.88);
+      border: 1px solid var(--border); padding: 8px 12px; border-radius: 6px;
+      font-size: 12px; color: var(--muted); pointer-events: none; line-height: 1.5;
+    }
+
+    aside {
+      width: 340px; background: var(--panel); border-left: 1px solid var(--border);
+      padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+    }
+    .section { border-bottom: 1px solid var(--border); padding-bottom: 14px; }
+    .section:last-child { border-bottom: none; }
+    .section h2 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; letter-spacing: 0.7px; }
+
+    label { display: block; font-size: 12px; margin-bottom: 4px; color: #d1d5db; }
+    input[type="range"], input[type="number"], select, input[type="file"] {
+      width: 100%; margin-bottom: 8px; background: #0f1117; border: 1px solid var(--border);
+      color: var(--text); padding: 6px 8px; border-radius: 5px; font-size: 12px;
+    }
+    input[type="range"] { padding: 0; accent-color: var(--accent); }
+
+    .angle-slot {
+      background: #11141d; border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px;
+    }
+    .angle-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; }
+    .angle-preview { width: 100%; height: 48px; object-fit: contain; background: #090b10; border-radius: 4px; display: none; }
+
+    .btn {
+      width: 100%; padding: 8px 12px; border: none; border-radius: 5px; font-size: 12px;
+      font-weight: 600; cursor: pointer; background: var(--accent); color: white; transition: 0.15s;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn-secondary { background: #262b38; color: #e5e7eb; }
+    .btn-secondary:hover { background: #323849; }
+    .btn-success { background: var(--success); color: #052e16; }
+    .btn-row { display: flex; gap: 8px; }
+
+    .timeline-bar {
+      height: 135px; background: var(--panel); border-top: 1px solid var(--border);
+      padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .timeline-controls { display: flex; align-items: center; gap: 10px; }
+    .timeline-controls .btn { width: auto; padding: 6px 14px; }
+    .time-display { font-family: monospace; font-size: 13px; color: var(--accent); min-width: 95px; }
+    #timeline-slider { width: 100%; margin: 0; cursor: pointer; }
+
+    .keyframes-list { display: flex; gap: 8px; overflow-x: auto; padding-top: 4px; align-items: center; }
+    .kf-chip {
+      background: #252a38; border: 1px solid var(--accent); padding: 4px 10px;
+      border-radius: 4px; font-size: 11px; display: flex; align-items: center; gap: 6px; cursor: pointer;
+    }
+    .kf-chip button { background: none; border: none; color: var(--danger); font-weight: bold; cursor: pointer; }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+
+  <header>
+    <h1>MultiView<span>3D</span> Studio</h1>
+    <div class="header-actions">
+      <button class="btn btn-secondary" style="width:auto;" id="reset-cam-btn">Reset Camera</button>
+      <button class="btn btn-secondary" style="width:auto;" id="export-glb-btn">💾 Export .GLB Model</button>
+      <button class="btn btn-success" style="width:auto;" id="render-video-btn">🎬 Render Video</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <div id="viewport-container">
+      <div class="hud">
+        1. Upload photos from different angles (Front, Right, Back, Left, Top).<br>
+        2. Click <b>Build 3D Model from Angles</b> to carve & texture the 3D mesh.<br>
+        3. Orbit camera & add keyframes below to render video.
+      </div>
+    </div>
+
+    <aside>
+      <!-- Section 1: Multi-Angle Photos Input -->
+      <div class="section">
+        <h2>1. Upload Different Angle Photos</h2>
+        <div id="angle-slots-container"></div>
+
+        <button class="btn btn-secondary" id="add-angle-btn" style="margin-bottom:10px;">+ Add Custom Angle Photo</button>
+
+        <label>Background Cutout Sensitivity: <span id="tol-val">45</span></label>
+        <input type="range" id="bg-tol-slider" min="10" max="120" step="1" value="45" />
+
+        <label>3D Voxel Grid Resolution</label>
+        <select id="voxel-res">
+          <option value="36">Fast Preview (36³)</option>
+          <option value="52" selected>Balanced Quality (52³)</option>
+          <option value="68">High Detail (68³)</option>
+        </select>
+
+        <button class="btn" id="reconstruct-btn">🔨 Build 3D Model from Angles</button>
+      </div>
+
+      <!-- Section 2: Edit Reconstructed 3D Model -->
+      <div class="section">
+        <h2>2. Edit 3D Model & Geometry</h2>
+        <label>Scale: <span id="scale-val">1.0</span></label>
+        <input type="range" id="scale-slider" min="0.2" max="3" step="0.1" value="1" />
+
+        <label>Vertical Stretch (Y): <span id="stretchy-val">1.0</span></label>
+        <input type="range" id="stretchy-slider" min="0.4" max="2.5" step="0.05" value="1" />
+
+        <label>Rotate Y: <span id="roty-val">0°</span></label>
+        <input type="range" id="roty-slider" min="-180" max="180" step="1" value="0" />
+
+        <label>Surface Smoothness (Laplacian)</label>
+        <div class="btn-row" style="margin-bottom:8px;">
+          <button class="btn btn-secondary" id="smooth-mesh-btn">✨ Smooth Mesh</button>
+          <button class="btn btn-secondary" id="toggle-wireframe">Wireframe</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Timeline -->
+  <div class="timeline-bar">
+    <div class="timeline-controls">
+      <button class="btn" id="play-btn">▶ Play</button>
+      <button class="btn btn-secondary" id="add-kf-btn">+ Add Camera Angle Keyframe</button>
+      <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+        <label style="margin:0;">Duration (s):</label>
+        <input type="number" id="duration-input" value="5" min="2" max="30" style="width:60px; margin:0;" />
+        <span class="time-display" id="time-display">0.00s / 5.00s</span>
+      </div>
+    </div>
+
+    <input type="range" id="timeline-slider" min="0" max="5" step="0.01" value="0" />
+
+    <div class="keyframes-list" id="keyframes-list">
+      <span style="font-size:11px; color:var(--muted);">Move camera to desired angle and click "+ Add Camera Angle Keyframe".</span>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+    import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+    // --- 1. THREE.JS VIEWPORT SETUP ---
+    const container = document.getElementById('viewport-container');
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+    camera.position.set(0, 1.2, 4.5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.1));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
+    keyLight.position.set(5, 8, 5);
+    scene.add(keyLight);
+    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.7);
+    rimLight.position.set(-5, 3, -5);
+    scene.add(rimLight);
+
+    const grid = new THREE.GridHelper(10, 20, 0x3b82f6, 0x222634);
+    grid.position.y = -1.5;
+    scene.add(grid);
+
+    let activeModel = null;
+    let isWireframe = false;
+
+    // Starter placeholder mesh
+    function initPlaceholder() {
+      const geo = new THREE.BoxGeometry(1.5, 1.5, 1.5, 8, 8, 8);
+      const mat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.45, metalness: 0.15 });
+      activeModel = new THREE.Mesh(geo, mat);
+      scene.add(activeModel);
+    }
+    initPlaceholder();
+
+    // --- 2. MULTI-ANGLE PHOTO SLOTS UI ---
+    const defaultAngles = [
+      { label: 'Front View', yaw: 0, pitch: 0 },
+      { label: 'Right Side View', yaw: 90, pitch: 0 },
+      { label: 'Back View', yaw: 180, pitch: 0 },
+      { label: 'Left Side View', yaw: 270, pitch: 0 },
+      { label: 'Top View (Optional)', yaw: 0, pitch: 90 }
+    ];
+
+    const angleViews = []; // Stores { yaw, pitch, image, canvasData }
+    const slotsContainer = document.getElementById('angle-slots-container');
+
+    function createAngleSlot(preset = { label: 'Custom Angle', yaw: 45, pitch: 0 }) {
+      const index = angleViews.length;
+      const viewObj = { yaw: preset.yaw, pitch: preset.pitch, image: null };
+      angleViews.push(viewObj);
+
+      const slot = document.createElement('div');
+      slot.className = 'angle-slot';
+      slot.innerHTML = `
+        <div class="angle-header">
+          <span>${preset.label}</span>
+          <div style="display:flex; gap:4px; align-items:center;">
+            <span style="font-size:10px; color:var(--muted);">Yaw°</span>
+            <input type="number" class="yaw-in" value="${preset.yaw}" style="width:52px; margin:0; padding:2px 4px;" />
+            <span style="font-size:10px; color:var(--muted);">Pitch°</span>
+            <input type="number" class="pitch-in" value="${preset.pitch}" style="width:48px; margin:0; padding:2px 4px;" />
+          </div>
+        </div>
+        <input type="file" accept="image/*" style="margin:0;" />
+        <img class="angle-preview" />
+      `;
+
+      const yawIn = slot.querySelector('.yaw-in');
+      const pitchIn = slot.querySelector('.pitch-in');
+      const fileIn = slot.querySelector('input[type="file"]');
+      const preview = slot.querySelector('.angle-preview');
+
+      yawIn.addEventListener('change', () => viewObj.yaw = parseFloat(yawIn.value) || 0);
+      pitchIn.addEventListener('change', () => viewObj.pitch = parseFloat(pitchIn.value) || 0);
+
+      fileIn.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const img = new Image();
+          img.onload = () => {
+            viewObj.image = img;
+            preview.src = ev.target.result;
+            preview.style.display = 'block';
+          };
+          img.src = ev.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+
+      slotsContainer.appendChild(slot);
+    }
+
+    defaultAngles.forEach(a => createAngleSlot(a));
+    document.getElementById('add-angle-btn').addEventListener('click', () => createAngleSlot());
+
+    document.getElementById('bg-tol-slider').addEventListener('input', (e) => {
+      document.getElementById('tol-val').textContent = e.target.value;
+    });
+
+    // --- 3. MULTI-VIEW VISUAL HULL + MARCHING CUBES 3D RECONSTRUCTION ---
+    function extractSilhouetteAndColors(img, size = 256, tolerance = 45) {
+      const c = document.createElement('canvas');
+      c.width = size;
+      c.height = size;
+      const ctx = c.getContext('2d');
+
+      // Fit image centered preserving aspect ratio
+      const scale = Math.min(size / img.width, size / img.height) * 0.88;
+      const w = img.width * scale;
+      const h = img.height * scale;
+      const ox = (size - w) / 2;
+      const oy = (size - h) / 2;
+
+      // Sample corner pixel as background color reference
+      const tempC = document.createElement('canvas');
+      tempC.width = 16; tempC.height = 16;
+      const tempCtx = tempC.getContext('2d');
+      tempCtx.drawImage(img, 0, 0, 16, 16);
+      const cornerData = tempCtx.getImageData(0, 0, 16, 16).data;
+
+      // Average the 4 corners for background color
+      const corners = [0, (15) * 4, (15 * 16) * 4, (16 * 16 - 1) * 4];
+      let bgR = 0, bgG = 0, bgB = 0;
+      corners.forEach(idx => {
+        bgR += cornerData[idx];
+        bgG += cornerData[idx + 1];
+        bgB += cornerData[idx + 2];
+      });
+      bgR /= 4; bgG /= 4; bgB /= 4;
+
+      ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
+      ctx.fillRect(0, 0, size, size);
+      ctx.drawImage(img, ox, oy, w, h);
+
+      const pixels = ctx.getImageData(0, 0, size, size).data;
+      const mask = new Uint8Array(size * size);
+
+      for (let i = 0; i < size * size; i++) {
+        const p = i * 4;
+        const dr = pixels[p] - bgR;
+        const dg = pixels[p + 1] - bgG;
+        const db = pixels[p + 2] - bgB;
+        const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+        mask[i] = dist > tolerance ? 1 : 0;
+      }
+
+      return { mask, pixels, size };
+    }
+
+    document.getElementById('reconstruct-btn').addEventListener('click', () => {
+      const validViews = angleViews.filter(v => v.image !== null);
+      if (validViews.length === 0) {
+        alert('Please upload at least 1 or more angle photos first!');
+        return;
+      }
+
+      const btn = document.getElementById('reconstruct-btn');
+      btn.textContent = '⏳ Carving 3D Voxels...';
+
+      setTimeout(() => {
+        const tolerance = parseInt(document.getElementById('bg-tol-slider').value);
+        const gridRes = parseInt(document.getElementById('voxel-res').value);
+        const texSize = 256;
+
+        // Preprocess each uploaded angle photo
+        const processedViews = validViews.map(v => {
+          const { mask, pixels, size } = extractSilhouetteAndColors(v.image, texSize, tolerance);
+          const yawRad = THREE.MathUtils.degToRad(v.yaw);
+          const pitchRad = THREE.MathUtils.degToRad(v.pitch);
+
+          // Camera viewing direction unit vector for this photo angle
+          const camDir = new THREE.Vector3(
+            Math.sin(yawRad) * Math.cos(pitchRad),
+            Math.sin(pitchRad),
+            Math.cos(yawRad) * Math.cos(pitchRad)
+          ).normalize();
+
+          // Local camera Right and Up axes for orthographic projection
+          const worldUp = Math.abs(v.pitch) > 85 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
+          const right = new THREE.Vector3().crossVectors(worldUp, camDir).normalize();
+          const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
+
+          return { mask, pixels, size, camDir, right, up };
+        });
+
+        // Build Marching Cubes Voxel Field
+        const mc = new MarchingCubes(gridRes, new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          roughness: 0.55,
+          metalness: 0.1
+        }), false, true, 120000);
+
+        mc.isolation = 0.5;
+        mc.reset();
+
+        const pVec = new THREE.Vector3();
+
+        // Carve 3D Space: A voxel survives ONLY if it lies inside the silhouette of ALL uploaded angles
+        for (let z = 0; z < gridRes; z++) {
+          const nz = (z / (gridRes - 1)) * 2 - 1; // [-1, 1]
+          for (let y = 0; y < gridRes; y++) {
+            const ny = (y / (gridRes - 1)) * 2 - 1;
+            for (let x = 0; x < gridRes; x++) {
+              const nx = (x / (gridRes - 1)) * 2 - 1;
+              pVec.set(nx, ny, nz);
+
+              let insideAllViews = true;
+              for (let v = 0; v < processedViews.length; v++) {
+                const view = processedViews[v];
+                const u = pVec.dot(view.right);
+                const w = pVec.dot(view.up);
+
+                const px = Math.floor(((u + 1) * 0.5) * (texSize - 1));
+                const py = Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1));
+
+                if (px < 0 || px >= texSize || py < 0 || py >= texSize) {
+                  insideAllViews = false;
+                  break;
+                }
+                if (view.mask[py * texSize + px] === 0) {
+                  insideAllViews = false;
+                  break;
+                }
+              }
+
+              const idx = x + y * gridRes + z * gridRes * gridRes;
+              mc.field[idx] = insideAllViews ? 1.0 : 0.0;
+            }
+          }
+        }
+
+        // Generate clean BufferGeometry from carved voxel volume
+        mc.update();
+        const rawGeo = mc.geometry.clone();
+        rawGeo.computeVertexNormals();
+
+        // Project real photo colors onto every 3D vertex based on surface normal facing angle
+        const posAttr = rawGeo.attributes.position;
+        const normAttr = rawGeo.attributes.normal;
+        const colors = new Float32Array(posAttr.count * 3);
+
+        const vPos = new THREE.Vector3();
+        const vNorm = new THREE.Vector3();
+
+        for (let i = 0; i < posAttr.count; i++) {
+          vPos.fromBufferAttribute(posAttr, i);
+          vNorm.fromBufferAttribute(normAttr, i).normalize();
+
+          let totalWeight = 0;
+          let rSum = 0, gSum = 0, bSum = 0;
+
+          for (let v = 0; v < processedViews.length; v++) {
+            const view = processedViews[v];
+            // Weight contribution by how directly the surface faces that photo's camera angle
+            const alignment = Math.max(0, vNorm.dot(view.camDir));
+            const weight = Math.pow(alignment, 3) + 0.01;
+
+            const u = vPos.dot(view.right);
+            const w = vPos.dot(view.up);
+            const px = THREE.MathUtils.clamp(Math.floor(((u + 1) * 0.5) * (texSize - 1)), 0, texSize - 1);
+            const py = THREE.MathUtils.clamp(Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1)), 0, texSize - 1);
+
+            const pIdx = (py * texSize + px) * 4;
+            rSum += (view.pixels[pIdx] / 255) * weight;
+            gSum += (view.pixels[pIdx + 1] / 255) * weight;
+            bSum += (view.pixels[pIdx + 2] / 255) * weight;
+            totalWeight += weight;
+          }
+
+          colors[i * 3] = rSum / totalWeight;
+          colors[i * 3 + 1] = gSum / totalWeight;
+          colors[i * 3 + 2] = bSum / totalWeight;
+        }
+
+        rawGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        if (activeModel) scene.remove(activeModel);
+        const mat = new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          roughness: 0.55,
+          metalness: 0.08,
+          wireframe: isWireframe
+        });
+
+        activeModel = new THREE.Mesh(rawGeo, mat);
+        activeModel.scale.setScalar(1.6);
+        scene.add(activeModel);
+
+        btn.textContent = '🔨 Build 3D Model from Angles';
+      }, 40);
+    });
+
+    // --- 4. MODEL EDITING & SMOOTHING ---
+    document.getElementById('scale-slider').addEventListener('input', (e) => {
+      const s = parseFloat(e.target.value);
+      const sy = parseFloat(document.getElementById('stretchy-slider').value);
+      document.getElementById('scale-val').textContent = s.toFixed(1);
+      if (activeModel) activeModel.scale.set(s * 1.6, s * sy * 1.6, s * 1.6);
+    });
+
+    document.getElementById('stretchy-slider').addEventListener('input', (e) => {
+      const sy = parseFloat(e.target.value);
+      const s = parseFloat(document.getElementById('scale-slider').value);
+      document.getElementById('stretchy-val').textContent = sy.toFixed(2);
+      if (activeModel) activeModel.scale.set(s * 1.6, s * sy * 1.6, s * 1.6);
+    });
+
+    document.getElementById('roty-slider').addEventListener('input', (e) => {
+      document.getElementById('roty-val').textContent = e.target.value + '°';
+      if (activeModel) activeModel.rotation.y = THREE.MathUtils.degToRad(parseFloat(e.target.value));
+    });
+
+    document.getElementById('toggle-wireframe').addEventListener('click', () => {
+      isWireframe = !isWireframe;
+      if (activeModel?.material) activeModel.material.wireframe = isWireframe;
+    });
+
+    // Vertex averaging filter to remove voxel stair-stepping
+    document.getElementById('smooth-mesh-btn').addEventListener('click', () => {
+      if (!activeModel?.geometry) return;
+      const geo = activeModel.geometry;
+      const pos = geo.attributes.position;
+      const map = new Map();
+
+      // Group coincident triangle vertices
+      for (let i = 0; i < pos.count; i++) {
+        const key = `${pos.getX(i).toFixed(4)}_${pos.getY(i).toFixed(4)}_${pos.getZ(i).toFixed(4)}`;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(i);
+      }
+
+      // Build adjacency and smooth
+      const neighbors = Array.from({ length: pos.count }, () => []);
+      for (let i = 0; i < pos.count; i += 3) {
+        const tri = [i, i + 1, i + 2];
+        for (let a = 0; a < 3; a++) {
+          const key = `${pos.getX(tri[a]).toFixed(4)}_${pos.getY(tri[a]).toFixed(4)}_${pos.getZ(tri[a]).toFixed(4)}`;
+          const shared = map.get(key);
+          for (const idx of shared) {
+            neighbors[idx].push(tri[(a + 1) % 3], tri[(a + 2) % 3]);
+          }
+        }
+      }
+
+      const newPos = new Float32Array(pos.array.length);
+      for (let i = 0; i < pos.count; i++) {
+        const nb = neighbors[i];
+        if (nb.length === 0) {
+          newPos[i * 3] = pos.getX(i);
+          newPos[i * 3 + 1] = pos.getY(i);
+          newPos[i * 3 + 2] = pos.getZ(i);
+          continue;
+        }
+        let sx = 0, sy = 0, sz = 0;
+        for (const n of nb) {
+          sx += pos.getX(n);
+          sy += pos.getY(n);
+          sz += pos.getZ(n);
+        }
+        newPos[i * 3] = pos.getX(i) * 0.5 + (sx / nb.length) * 0.5;
+        newPos[i * 3 + 1] = pos.getY(i) * 0.5 + (sy / nb.length) * 0.5;
+        newPos[i * 3 + 2] = pos.getZ(i) * 0.5 + (sz / nb.length) * 0.5;
+      }
+
+      pos.array.set(newPos);
+      pos.needsUpdate = true;
+      geo.computeVertexNormals();
+    });
+
+    // Export reconstructed 3D model as .GLB
+    document.getElementById('export-glb-btn').addEventListener('click', () => {
+      if (!activeModel) return;
+      const exporter = new GLTFExporter();
+      exporter.parse(activeModel, (glb) => {
+        const blob = new Blob([glb], { type: 'model/gltf-binary' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `reconstructed-3d-${Date.now()}.glb`;
+        a.click();
+      }, (err) => console.error(err), { binary: true });
+    });
+
+    document.getElementById('reset-cam-btn').addEventListener('click', () => {
+      camera.position.set(0, 1.2, 4.5);
+      controls.target.set(0, 0, 0);
+      controls.update();
+    });
+
+    // --- 5. CAMERA ANGLE KEYFRAME ANIMATION ---
+    let keyframes = [];
+    let currentTime = 0;
+    let duration = 5;
+    let isPlaying = false;
+    let lastFrameTime = performance.now();
+
+    const slider = document.getElementById('timeline-slider');
+    const timeDisplay = document.getElementById('time-display');
+    const kfListEl = document.getElementById('keyframes-list');
+
+    function updateTimeUI() {
+      slider.max = duration;
+      slider.value = currentTime;
+      timeDisplay.textContent = `${currentTime.toFixed(2)}s / ${duration.toFixed(2)}s`;
+    }
+
+    function renderKeyframeChips() {
+      keyframes.sort((a, b) => a.time - b.time);
+      if (keyframes.length === 0) {
+        kfListEl.innerHTML = `<span style="font-size:11px; color:var(--muted);">Move camera to desired angle and click "+ Add Camera Angle Keyframe".</span>`;
+        return;
+      }
+      kfListEl.innerHTML = '';
+      keyframes.forEach((kf, idx) => {
+        const chip = document.createElement('div');
+        chip.className = 'kf-chip';
+        chip.innerHTML = `<span>🎥 ${kf.time.toFixed(2)}s</span>`;
+        chip.onclick = () => {
+          currentTime = kf.time;
+          applyCameraAtTime(currentTime);
+          updateTimeUI();
+        };
+        const del = document.createElement('button');
+        del.textContent = '×';
+        del.onclick = (e) => {
+          e.stopPropagation();
+          keyframes.splice(idx, 1);
+          renderKeyframeChips();
+        };
+        chip.appendChild(del);
+        kfListEl.appendChild(chip);
+      });
+    }
+
+    function applyCameraAtTime(t) {
+      if (keyframes.length === 0) return;
+      if (keyframes.length === 1 || t <= keyframes[0].time) {
+        camera.position.copy(keyframes[0].pos);
+        controls.target.copy(keyframes[0].target);
+        controls.update();
+        return;
+      }
+      const last = keyframes[keyframes.length - 1];
+      if (t >= last.time) {
+        camera.position.copy(last.pos);
+        controls.target.copy(last.target);
+        controls.update();
+        return;
+      }
+      for (let i = 0; i < keyframes.length - 1; i++) {
+        const k1 = keyframes[i];
+        const k2 = keyframes[i + 1];
+        if (t >= k1.time && t <= k2.time) {
+          const rawAlpha = (t - k1.time) / (k2.time - k1.time);
+          const alpha = rawAlpha * rawAlpha * (3 - 2 * rawAlpha);
+          camera.position.lerpVectors(k1.pos, k2.pos, alpha);
+          controls.target.lerpVectors(k1.target, k2.target, alpha);
+          controls.update();
+          break;
+        }
+      }
+    }
+
+    document.getElementById('add-kf-btn').addEventListener('click', () => {
+      keyframes = keyframes.filter(k => Math.abs(k.time - currentTime) > 0.05);
+      keyframes.push({
+        time: currentTime,
+        pos: camera.position.clone(),
+        target: controls.target.clone()
+      });
+      renderKeyframeChips();
+    });
+
+    document.getElementById('duration-input').addEventListener('change', (e) => {
+      duration = Math.max(1, parseFloat(e.target.value) || 5);
+      if (currentTime > duration) currentTime = duration;
+      updateTimeUI();
+    });
+
+    slider.addEventListener('input', (e) => {
+      isPlaying = false;
+      document.getElementById('play-btn').textContent = '▶ Play';
+      currentTime = parseFloat(e.target.value);
+      applyCameraAtTime(currentTime);
+      updateTimeUI();
+    });
+
+    document.getElementById('play-btn').addEventListener('click', () => {
+      isPlaying = !isPlaying;
+      if (isPlaying && currentTime >= duration) currentTime = 0;
+      document.getElementById('play-btn').textContent = isPlaying ? '⏸ Pause' : '▶ Play';
+    });
+
+    // --- 6. VIDEO EXPORT ---
+    document.getElementById('render-video-btn').addEventListener('click', () => {
+      const btn = document.getElementById('render-video-btn');
+      btn.textContent = '🔴 Rendering...';
+      btn.disabled = true;
+      grid.visible = false;
+      currentTime = 0;
+      isPlaying = true;
+
+      const stream = renderer.domElement.captureStream(60);
+      const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+      const chunks = [];
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `multiview-3d-video-${Date.now()}.webm`;
+        a.click();
+        grid.visible = true;
+        btn.textContent = '🎬 Render Video';
+        btn.disabled = false;
+      };
+
+      recorder.start();
+      setTimeout(() => {
+        isPlaying = false;
+        document.getElementById('play-btn').textContent = '▶ Play';
+        recorder.stop();
+      }, duration * 1000 + 100);
+    });
+
+    // --- 7. RENDER LOOP ---
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const dt = (now - lastFrameTime) / 1000;
+      lastFrameTime = now;
+
+      if (isPlaying) {
+        currentTime += dt;
+        if (currentTime >= duration) {
+          currentTime = duration;
+          isPlaying = false;
+          document.getElementById('play-btn').textContent = '▶ Play';
+        }
+        applyCameraAtTime(currentTime);
+        updateTimeUI();
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    animate(performance.now());
+  </script>
+</body>
+</html>
