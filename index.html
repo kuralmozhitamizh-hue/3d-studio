@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MultiView 3D Studio — Multi-Angle Photos to 3D & Video</title>
+  <title>MultiView 3D Studio — Tripo AI & Camera Animator</title>
   <style>
     :root {
       --bg: #0f1117;
@@ -46,7 +46,7 @@
     .section h2 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; letter-spacing: 0.7px; }
 
     label { display: block; font-size: 12px; margin-bottom: 4px; color: #d1d5db; }
-    input[type="range"], input[type="number"], select, input[type="file"] {
+    input[type="range"], input[type="number"], input[type="password"], input[type="text"], select, input[type="file"] {
       width: 100%; margin-bottom: 8px; background: #0f1117; border: 1px solid var(--border);
       color: var(--text); padding: 6px 8px; border-radius: 5px; font-size: 12px;
     }
@@ -68,6 +68,7 @@
     .btn-secondary:hover { background: #323849; }
     .btn-success { background: var(--success); color: #052e16; }
     .btn-row { display: flex; gap: 8px; }
+    .status-note { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
 
     .timeline-bar {
       height: 135px; background: var(--panel); border-top: 1px solid var(--border);
@@ -110,15 +111,19 @@
     <div id="viewport-container">
       <div class="hud">
         1. Upload photos from different angles (Front, Right, Back, Left, Top).<br>
-        2. Click <b>Build 3D Model from Angles</b> to carve & texture the 3D mesh.<br>
+        2. Click <b>Build 3D Model from Angles</b> (Tripo AI if API key set, else local mesh).<br>
         3. Orbit camera & add keyframes below to render video.
       </div>
     </div>
 
     <aside>
-      <!-- Section 1: Multi-Angle Photos Input -->
+      <!-- Section 1: Multi-Angle Photos Input & Tripo AI -->
       <div class="section">
         <h2>1. Upload Different Angle Photos</h2>
+
+        <label>Tripo API Key (Saved in Browser Only)</label>
+        <input type="password" id="tripo-api-key" placeholder="tsk_... (optional for Tripo AI)" />
+
         <div id="angle-slots-container"></div>
 
         <button class="btn btn-secondary" id="add-angle-btn" style="margin-bottom:10px;">+ Add Custom Angle Photo</button>
@@ -126,7 +131,7 @@
         <label>Background Cutout Sensitivity: <span id="tol-val">45</span></label>
         <input type="range" id="bg-tol-slider" min="10" max="120" step="1" value="45" />
 
-        <label>3D Voxel Grid Resolution</label>
+        <label>3D Voxel Grid Resolution (Fallback)</label>
         <select id="voxel-res">
           <option value="44">Fast Preview (44³)</option>
           <option value="64" selected>Balanced Quality (64³)</option>
@@ -134,6 +139,9 @@
         </select>
 
         <button class="btn" id="reconstruct-btn">🔨 Build 3D Model from Angles</button>
+        <div class="status-note" id="ai-status">
+          Tip: Add your Tripo API key above for Tripo Studio-style 3D mesh generation, or run without key for local mesh preview.
+        </div>
       </div>
 
       <!-- Section 2: Edit Reconstructed 3D Model -->
@@ -180,6 +188,7 @@
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
     import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
     import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
     // --- 1. THREE.JS VIEWPORT & PHYSICAL GROUND PLANE SETUP ---
@@ -212,7 +221,6 @@
     rimLight.position.set(-4, 3, -5);
     scene.add(rimLight);
 
-    // Physical floor contact surface (normal reaction force plane at FLOOR_Y)
     const floorMat = new THREE.ShadowMaterial({ opacity: 0.35 });
     const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), floorMat);
     floorMesh.rotation.x = -Math.PI / 2;
@@ -227,7 +235,6 @@
     let activeModel = null;
     let isWireframe = false;
 
-    // Ground the model's lowest point cleanly onto FLOOR_Y (no floating or sinking)
     function groundModelOnFloor() {
       if (!activeModel) return;
       activeModel.updateMatrixWorld(true);
@@ -248,19 +255,43 @@
       groundModelOnFloor();
     }
 
-    // Starter placeholder mesh resting on the floor
+    function setActive3DObject(obj) {
+      if (activeModel) scene.remove(activeModel);
+      activeModel = obj;
+      activeModel.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+          if (child.material) child.material.wireframe = isWireframe;
+        }
+      });
+      scene.add(activeModel);
+
+      document.getElementById('scale-slider').value = 1;
+      document.getElementById('scale-val').textContent = '1.0';
+      document.getElementById('stretchy-slider').value = 1;
+      document.getElementById('stretchy-val').textContent = '1.0';
+      document.getElementById('roty-slider').value = 0;
+      document.getElementById('roty-val').textContent = '0°';
+      applyModelTransforms();
+    }
+
     function initPlaceholder() {
       const geo = new THREE.BoxGeometry(1.2, 1.2, 1.2, 8, 8, 8);
       const mat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.45, metalness: 0.15 });
-      activeModel = new THREE.Mesh(geo, mat);
-      activeModel.castShadow = true;
-      activeModel.receiveShadow = true;
-      scene.add(activeModel);
-      applyModelTransforms();
+      setActive3DObject(new THREE.Mesh(geo, mat));
     }
     initPlaceholder();
 
-    // --- 2. MULTI-ANGLE PHOTO SLOTS UI ---
+    // --- 2. TRIPO API KEY PERSISTENCE ---
+    const apiKeyInput = document.getElementById('tripo-api-key');
+    const aiStatusEl = document.getElementById('ai-status');
+    apiKeyInput.value = localStorage.getItem('tripo_api_key') || '';
+    apiKeyInput.addEventListener('input', () => {
+      localStorage.setItem('tripo_api_key', apiKeyInput.value.trim());
+    });
+
+    // --- 3. MULTI-ANGLE PHOTO SLOTS UI ---
     const defaultAngles = [
       { label: 'Front View', yaw: 0, pitch: 0 },
       { label: 'Right Side View', yaw: 90, pitch: 0 },
@@ -273,7 +304,7 @@
     const slotsContainer = document.getElementById('angle-slots-container');
 
     function createAngleSlot(preset = { label: 'Custom Angle', yaw: 45, pitch: 0 }) {
-      const viewObj = { yaw: preset.yaw, pitch: preset.pitch, image: null };
+      const viewObj = { yaw: preset.yaw, pitch: preset.pitch, image: null, file: null };
       angleViews.push(viewObj);
 
       const slot = document.createElement('div');
@@ -303,6 +334,7 @@
       fileIn.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
+        viewObj.file = file;
         const reader = new FileReader();
         reader.onload = (ev) => {
           const img = new Image();
@@ -326,7 +358,92 @@
       document.getElementById('tol-val').textContent = e.target.value;
     });
 
-    // --- 3. IMPROVED MULTI-VIEW VISUAL HULL + MARCHING CUBES RECONSTRUCTION ---
+    // --- 4. TRIPO AI MULTI-VIEW / IMAGE-TO-3D PIPELINE ---
+    const gltfLoader = new GLTFLoader();
+
+    async function uploadImageToTripo(file, apiKey) {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('https://api.tripo3d.ai/v2/openapi/upload', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        body: formData
+      });
+      const json = await res.json();
+      if (!res.ok || json.code !== 0) {
+        throw new Error(json.message || 'Tripo image upload failed');
+      }
+      return json.data.image_token;
+    }
+
+    async function generateWithTripo(validViews, apiKey) {
+      aiStatusEl.textContent = '⬆️ Uploading angle photos to Tripo...';
+      const tokens = [];
+      for (const v of validViews) {
+        if (v.file) {
+          const token = await uploadImageToTripo(v.file, apiKey);
+          tokens.push(token);
+        }
+      }
+
+      if (tokens.length === 0) throw new Error('No image files found');
+
+      // Use multiview_to_model when multiple views are uploaded, else image_to_model
+      const isMulti = tokens.length > 1;
+      const taskBody = isMulti
+        ? { type: 'multiview_to_model', files: tokens.map(t => ({ type: 'png', file_token: t })) }
+        : { type: 'image_to_model', file: { type: 'png', file_token: tokens[0] } };
+
+      aiStatusEl.textContent = '🧠 Generating 3D mesh on Tripo Studio API...';
+      const createRes = await fetch('https://api.tripo3d.ai/v2/openapi/task', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(taskBody)
+      });
+      const createJson = await createRes.json();
+      if (!createRes.ok || createJson.code !== 0) {
+        throw new Error(createJson.message || 'Tripo task creation failed');
+      }
+
+      const taskId = createJson.data.task_id;
+
+      // Poll until task completes
+      while (true) {
+        await new Promise(r => setTimeout(r, 2500));
+        const pollRes = await fetch(`https://api.tripo3d.ai/v2/openapi/task/${taskId}`, {
+          headers: { 'Authorization': `Bearer ${apiKey}` }
+        });
+        const pollJson = await pollRes.json();
+        const status = pollJson?.data?.status;
+        const progress = pollJson?.data?.progress ?? 0;
+
+        aiStatusEl.textContent = `⚙️ Tripo 3D Status: ${status} (${progress}%)`;
+
+        if (status === 'success') {
+          const modelUrl =
+            pollJson.data.output?.pbr_model ||
+            pollJson.data.output?.model ||
+            pollJson.data.result?.pbr_model?.url ||
+            pollJson.data.result?.model?.url;
+
+          if (!modelUrl) throw new Error('Tripo completed but no .glb URL returned');
+
+          return new Promise((resolve, reject) => {
+            gltfLoader.load(modelUrl, (gltf) => resolve(gltf.scene), undefined, reject);
+          });
+        }
+
+        if (status === 'failed' || status === 'cancelled' || status === 'unknown') {
+          throw new Error(`Tripo 3D task ${status}`);
+        }
+      }
+    }
+
+    // --- 5. LOCAL FALLBACK VISUAL HULL + MARCHING CUBES ---
     function extractSilhouetteAndColors(img, size = 256, tolerance = 45) {
       const c = document.createElement('canvas');
       c.width = size;
@@ -343,14 +460,12 @@
       ctx.drawImage(img, ox, oy, w, h);
       const pixels = ctx.getImageData(0, 0, size, size).data;
 
-      // Detect if image has meaningful transparency (e.g. PNG cutouts)
       let transparentCount = 0;
       for (let i = 3; i < pixels.length; i += 4) {
         if (pixels[i] < 32) transparentCount++;
       }
       const hasAlphaCutout = transparentCount > (size * size * 0.05);
 
-      // Sample border pixels for solid background color fallback
       let bgR = 0, bgG = 0, bgB = 0, bgSamples = 0;
       for (let x = 0; x < size; x += 8) {
         for (const y of [2, size - 3]) {
@@ -369,23 +484,122 @@
         const a = pixels[p + 3];
         if (hasAlphaCutout) {
           mask[i] = a > 90 ? 1 : 0;
+        } else if (a < 30) {
+          mask[i] = 0;
         } else {
-          if (a < 30) {
-            mask[i] = 0;
-          } else {
-            const dr = pixels[p] - bgR;
-            const dg = pixels[p + 1] - bgG;
-            const db = pixels[p + 2] - bgB;
-            const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-            mask[i] = dist > tolerance ? 1 : 0;
+          const dr = pixels[p] - bgR;
+          const dg = pixels[p + 1] - bgG;
+          const db = pixels[p + 2] - bgB;
+          mask[i] = Math.sqrt(dr * dr + dg * dg + db * db) > tolerance ? 1 : 0;
+        }
+      }
+      return { mask, pixels, size };
+    }
+
+    function buildLocalVoxelMesh(validViews) {
+      const tolerance = parseInt(document.getElementById('bg-tol-slider').value);
+      const gridRes = parseInt(document.getElementById('voxel-res').value);
+      const texSize = 256;
+
+      const processedViews = validViews.map(v => {
+        const { mask, pixels, size } = extractSilhouetteAndColors(v.image, texSize, tolerance);
+        const yawRad = THREE.MathUtils.degToRad(v.yaw);
+        const pitchRad = THREE.MathUtils.degToRad(v.pitch);
+
+        const camDir = new THREE.Vector3(
+          Math.sin(yawRad) * Math.cos(pitchRad),
+          Math.sin(pitchRad),
+          Math.cos(yawRad) * Math.cos(pitchRad)
+        ).normalize();
+
+        const worldUp = Math.abs(v.pitch) > 85 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
+        const right = new THREE.Vector3().crossVectors(worldUp, camDir).normalize();
+        const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
+
+        return { mask, pixels, size, camDir, right, up };
+      });
+
+      const mc = new MarchingCubes(gridRes, new THREE.MeshStandardMaterial({
+        vertexColors: true, roughness: 0.55, metalness: 0.08
+      }), false, true, 200000);
+      mc.isolation = 25;
+      mc.reset();
+
+      const pVec = new THREE.Vector3();
+      for (let z = 1; z < gridRes - 1; z++) {
+        const nz = ((z - 1) / (gridRes - 3)) * 2 - 1;
+        for (let y = 1; y < gridRes - 1; y++) {
+          const ny = ((y - 1) / (gridRes - 3)) * 2 - 1;
+          for (let x = 1; x < gridRes - 1; x++) {
+            const nx = ((x - 1) / (gridRes - 3)) * 2 - 1;
+            pVec.set(nx, ny, nz);
+
+            let insideCount = 0;
+            for (let v = 0; v < processedViews.length; v++) {
+              const view = processedViews[v];
+              const u = pVec.dot(view.right);
+              const w = pVec.dot(view.up);
+              const px = Math.floor(((u + 1) * 0.5) * (texSize - 1));
+              const py = Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1));
+              if (px >= 0 && px < texSize && py >= 0 && py < texSize && view.mask[py * texSize + px] === 1) {
+                insideCount++;
+              }
+            }
+
+            mc.field[x + y * gridRes + z * gridRes * gridRes] = (insideCount === processedViews.length) ? 60.0 : -10.0;
           }
         }
       }
 
-      return { mask, pixels, size };
+      mc.update();
+      const rawGeo = mc.geometry.clone();
+      rawGeo.computeVertexNormals();
+
+      const posAttr = rawGeo.attributes.position;
+      const normAttr = rawGeo.attributes.normal;
+      const colors = new Float32Array(posAttr.count * 3);
+      const vPos = new THREE.Vector3();
+      const vNorm = new THREE.Vector3();
+
+      for (let i = 0; i < posAttr.count; i++) {
+        vPos.fromBufferAttribute(posAttr, i);
+        vNorm.fromBufferAttribute(normAttr, i).normalize();
+
+        let totalWeight = 0, rSum = 0, gSum = 0, bSum = 0;
+        for (let v = 0; v < processedViews.length; v++) {
+          const view = processedViews[v];
+          const alignment = Math.max(0, vNorm.dot(view.camDir));
+          const weight = Math.pow(alignment, 4) + 0.005;
+
+          const u = THREE.MathUtils.clamp(vPos.x, -1, 1) * view.right.x +
+                    THREE.MathUtils.clamp(vPos.y, -1, 1) * view.right.y +
+                    THREE.MathUtils.clamp(vPos.z, -1, 1) * view.right.z;
+          const w = THREE.MathUtils.clamp(vPos.x, -1, 1) * view.up.x +
+                    THREE.MathUtils.clamp(vPos.y, -1, 1) * view.up.y +
+                    THREE.MathUtils.clamp(vPos.z, -1, 1) * view.up.z;
+
+          const px = THREE.MathUtils.clamp(Math.floor(((u + 1) * 0.5) * (texSize - 1)), 0, texSize - 1);
+          const py = THREE.MathUtils.clamp(Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1)), 0, texSize - 1);
+          const pIdx = (py * texSize + px) * 4;
+
+          rSum += (view.pixels[pIdx] / 255) * weight;
+          gSum += (view.pixels[pIdx + 1] / 255) * weight;
+          bSum += (view.pixels[pIdx + 2] / 255) * weight;
+          totalWeight += weight;
+        }
+
+        colors[i * 3] = rSum / totalWeight;
+        colors[i * 3 + 1] = gSum / totalWeight;
+        colors[i * 3 + 2] = bSum / totalWeight;
+      }
+
+      rawGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      return new THREE.Mesh(rawGeo, new THREE.MeshStandardMaterial({
+        vertexColors: true, roughness: 0.5, metalness: 0.08
+      }));
     }
 
-    document.getElementById('reconstruct-btn').addEventListener('click', () => {
+    document.getElementById('reconstruct-btn').addEventListener('click', async () => {
       const validViews = angleViews.filter(v => v.image !== null);
       if (validViews.length === 0) {
         alert('Please upload at least 1 or more angle photos first!');
@@ -393,149 +607,32 @@
       }
 
       const btn = document.getElementById('reconstruct-btn');
-      btn.textContent = '⏳ Carving 3D Voxels...';
+      btn.disabled = true;
+      btn.textContent = '⏳ Building 3D Model...';
 
-      setTimeout(() => {
-        const tolerance = parseInt(document.getElementById('bg-tol-slider').value);
-        const gridRes = parseInt(document.getElementById('voxel-res').value);
-        const texSize = 256;
+      const apiKey = apiKeyInput.value.trim();
 
-        const processedViews = validViews.map(v => {
-          const { mask, pixels, size } = extractSilhouetteAndColors(v.image, texSize, tolerance);
-          const yawRad = THREE.MathUtils.degToRad(v.yaw);
-          const pitchRad = THREE.MathUtils.degToRad(v.pitch);
-
-          // Standard right-handed camera direction: yaw=0 -> +Z, yaw=90 -> +X
-          const camDir = new THREE.Vector3(
-            Math.sin(yawRad) * Math.cos(pitchRad),
-            Math.sin(pitchRad),
-            Math.cos(yawRad) * Math.cos(pitchRad)
-          ).normalize();
-
-          const worldUp = Math.abs(v.pitch) > 85 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
-          const right = new THREE.Vector3().crossVectors(worldUp, camDir).normalize();
-          const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
-
-          return { mask, pixels, size, camDir, right, up };
-        });
-
-        // MarchingCubes uses an internal border margin of 1 voxel on each side
-        const mc = new MarchingCubes(gridRes, new THREE.MeshStandardMaterial({
-          vertexColors: true,
-          roughness: 0.55,
-          metalness: 0.08
-        }), false, true, 200000);
-
-        mc.isolation = 25;
-        mc.reset();
-
-        const pVec = new THREE.Vector3();
-
-        for (let z = 1; z < gridRes - 1; z++) {
-          const nz = ((z - 1) / (gridRes - 3)) * 2 - 1;
-          for (let y = 1; y < gridRes - 1; y++) {
-            const ny = ((y - 1) / (gridRes - 3)) * 2 - 1;
-            for (let x = 1; x < gridRes - 1; x++) {
-              const nx = ((x - 1) / (gridRes - 3)) * 2 - 1;
-              pVec.set(nx, ny, nz);
-
-              let insideCount = 0;
-              for (let v = 0; v < processedViews.length; v++) {
-                const view = processedViews[v];
-                const u = pVec.dot(view.right);
-                const w = pVec.dot(view.up);
-
-                const px = Math.floor(((u + 1) * 0.5) * (texSize - 1));
-                const py = Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1));
-
-                if (px >= 0 && px < texSize && py >= 0 && py < texSize && view.mask[py * texSize + px] === 1) {
-                  insideCount++;
-                }
-              }
-
-              // Require full visual hull intersection across all uploaded angles
-              const isInside = insideCount === processedViews.length;
-              const idx = x + y * gridRes + z * gridRes * gridRes;
-              mc.field[idx] = isInside ? 60.0 : -10.0;
-            }
-          }
+      try {
+        if (apiKey) {
+          const tripoMesh = await generateWithTripo(validViews, apiKey);
+          setActive3DObject(tripoMesh);
+          aiStatusEl.textContent = '✅ Tripo 3D model loaded and grounded!';
+        } else {
+          const localMesh = buildLocalVoxelMesh(validViews);
+          setActive3DObject(localMesh);
+          aiStatusEl.textContent = 'ℹ️ Built via local fallback (add Tripo API key for Tripo Studio AI mesh).';
         }
-
-        mc.update();
-        const rawGeo = mc.geometry.clone();
-        rawGeo.computeVertexNormals();
-
-        // Project clean photo colors onto vertices with angular normal weighting
-        const posAttr = rawGeo.attributes.position;
-        const normAttr = rawGeo.attributes.normal;
-        const colors = new Float32Array(posAttr.count * 3);
-
-        const vPos = new THREE.Vector3();
-        const vNorm = new THREE.Vector3();
-
-        for (let i = 0; i < posAttr.count; i++) {
-          vPos.fromBufferAttribute(posAttr, i);
-          vNorm.fromBufferAttribute(normAttr, i).normalize();
-
-          let totalWeight = 0;
-          let rSum = 0, gSum = 0, bSum = 0;
-
-          for (let v = 0; v < processedViews.length; v++) {
-            const view = processedViews[v];
-            const alignment = Math.max(0, vNorm.dot(view.camDir));
-            const weight = Math.pow(alignment, 4) + 0.005;
-
-            const u = THREE.MathUtils.clamp(vPos.x, -1, 1) * view.right.x +
-                      THREE.MathUtils.clamp(vPos.y, -1, 1) * view.right.y +
-                      THREE.MathUtils.clamp(vPos.z, -1, 1) * view.right.z;
-            const w = THREE.MathUtils.clamp(vPos.x, -1, 1) * view.up.x +
-                      THREE.MathUtils.clamp(vPos.y, -1, 1) * view.up.y +
-                      THREE.MathUtils.clamp(vPos.z, -1, 1) * view.up.z;
-
-            const px = THREE.MathUtils.clamp(Math.floor(((u + 1) * 0.5) * (texSize - 1)), 0, texSize - 1);
-            const py = THREE.MathUtils.clamp(Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1)), 0, texSize - 1);
-
-            const pIdx = (py * texSize + px) * 4;
-            rSum += (view.pixels[pIdx] / 255) * weight;
-            gSum += (view.pixels[pIdx + 1] / 255) * weight;
-            bSum += (view.pixels[pIdx + 2] / 255) * weight;
-            totalWeight += weight;
-          }
-
-          colors[i * 3] = rSum / totalWeight;
-          colors[i * 3 + 1] = gSum / totalWeight;
-          colors[i * 3 + 2] = bSum / totalWeight;
-        }
-
-        rawGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-        if (activeModel) scene.remove(activeModel);
-        const mat = new THREE.MeshStandardMaterial({
-          vertexColors: true,
-          roughness: 0.5,
-          metalness: 0.08,
-          wireframe: isWireframe
-        });
-
-        activeModel = new THREE.Mesh(rawGeo, mat);
-        activeModel.castShadow = true;
-        activeModel.receiveShadow = true;
-        scene.add(activeModel);
-
-        // Reset transform sliders and ground cleanly on floor
-        document.getElementById('scale-slider').value = 1;
-        document.getElementById('scale-val').textContent = '1.0';
-        document.getElementById('stretchy-slider').value = 1;
-        document.getElementById('stretchy-val').textContent = '1.0';
-        document.getElementById('roty-slider').value = 0;
-        document.getElementById('roty-val').textContent = '0°';
-        applyModelTransforms();
-
+      } catch (err) {
+        console.error(err);
+        aiStatusEl.textContent = `⚠️ ${err.message} — using local fallback mesh.`;
+        setActive3DObject(buildLocalVoxelMesh(validViews));
+      } finally {
+        btn.disabled = false;
         btn.textContent = '🔨 Build 3D Model from Angles';
-      }, 40);
+      }
     });
 
-    // --- 4. MODEL EDITING & SMOOTHING ---
+    // --- 6. MODEL EDITING & SMOOTHING ---
     document.getElementById('scale-slider').addEventListener('input', (e) => {
       document.getElementById('scale-val').textContent = parseFloat(e.target.value).toFixed(1);
       applyModelTransforms();
@@ -553,56 +650,63 @@
 
     document.getElementById('toggle-wireframe').addEventListener('click', () => {
       isWireframe = !isWireframe;
-      if (activeModel?.material) activeModel.material.wireframe = isWireframe;
+      if (activeModel) {
+        activeModel.traverse((child) => {
+          if (child.isMesh && child.material) child.material.wireframe = isWireframe;
+        });
+      }
     });
 
     document.getElementById('smooth-mesh-btn').addEventListener('click', () => {
-      if (!activeModel?.geometry) return;
-      const geo = activeModel.geometry;
-      const pos = geo.attributes.position;
-      const map = new Map();
+      if (!activeModel) return;
+      activeModel.traverse((child) => {
+        if (!child.isMesh || !child.geometry?.attributes?.position) return;
+        const geo = child.geometry;
+        const pos = geo.attributes.position;
+        const map = new Map();
 
-      for (let i = 0; i < pos.count; i++) {
-        const key = `${pos.getX(i).toFixed(4)}_${pos.getY(i).toFixed(4)}_${pos.getZ(i).toFixed(4)}`;
-        if (!map.has(key)) map.set(key, []);
-        map.get(key).push(i);
-      }
+        for (let i = 0; i < pos.count; i++) {
+          const key = `${pos.getX(i).toFixed(4)}_${pos.getY(i).toFixed(4)}_${pos.getZ(i).toFixed(4)}`;
+          if (!map.has(key)) map.set(key, []);
+          map.get(key).push(i);
+        }
 
-      const neighbors = Array.from({ length: pos.count }, () => []);
-      for (let i = 0; i < pos.count; i += 3) {
-        const tri = [i, i + 1, i + 2];
-        for (let a = 0; a < 3; a++) {
-          const key = `${pos.getX(tri[a]).toFixed(4)}_${pos.getY(tri[a]).toFixed(4)}_${pos.getZ(tri[a]).toFixed(4)}`;
-          const shared = map.get(key);
-          for (const idx of shared) {
-            neighbors[idx].push(tri[(a + 1) % 3], tri[(a + 2) % 3]);
+        const neighbors = Array.from({ length: pos.count }, () => []);
+        for (let i = 0; i < pos.count; i += 3) {
+          const tri = [i, i + 1, i + 2];
+          for (let a = 0; a < 3; a++) {
+            const key = `${pos.getX(tri[a]).toFixed(4)}_${pos.getY(tri[a]).toFixed(4)}_${pos.getZ(tri[a]).toFixed(4)}`;
+            const shared = map.get(key);
+            for (const idx of shared) {
+              neighbors[idx].push(tri[(a + 1) % 3], tri[(a + 2) % 3]);
+            }
           }
         }
-      }
 
-      const newPos = new Float32Array(pos.array.length);
-      for (let i = 0; i < pos.count; i++) {
-        const nb = neighbors[i];
-        if (nb.length === 0) {
-          newPos[i * 3] = pos.getX(i);
-          newPos[i * 3 + 1] = pos.getY(i);
-          newPos[i * 3 + 2] = pos.getZ(i);
-          continue;
+        const newPos = new Float32Array(pos.array.length);
+        for (let i = 0; i < pos.count; i++) {
+          const nb = neighbors[i];
+          if (nb.length === 0) {
+            newPos[i * 3] = pos.getX(i);
+            newPos[i * 3 + 1] = pos.getY(i);
+            newPos[i * 3 + 2] = pos.getZ(i);
+            continue;
+          }
+          let sx = 0, sy = 0, sz = 0;
+          for (const n of nb) {
+            sx += pos.getX(n);
+            sy += pos.getY(n);
+            sz += pos.getZ(n);
+          }
+          newPos[i * 3] = pos.getX(i) * 0.5 + (sx / nb.length) * 0.5;
+          newPos[i * 3 + 1] = pos.getY(i) * 0.5 + (sy / nb.length) * 0.5;
+          newPos[i * 3 + 2] = pos.getZ(i) * 0.5 + (sz / nb.length) * 0.5;
         }
-        let sx = 0, sy = 0, sz = 0;
-        for (const n of nb) {
-          sx += pos.getX(n);
-          sy += pos.getY(n);
-          sz += pos.getZ(n);
-        }
-        newPos[i * 3] = pos.getX(i) * 0.5 + (sx / nb.length) * 0.5;
-        newPos[i * 3 + 1] = pos.getY(i) * 0.5 + (sy / nb.length) * 0.5;
-        newPos[i * 3 + 2] = pos.getZ(i) * 0.5 + (sz / nb.length) * 0.5;
-      }
 
-      pos.array.set(newPos);
-      pos.needsUpdate = true;
-      geo.computeVertexNormals();
+        pos.array.set(newPos);
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+      });
       groundModelOnFloor();
     });
 
@@ -624,7 +728,7 @@
       controls.update();
     });
 
-    // --- 5. CAMERA ANGLE KEYFRAME ANIMATION ---
+    // --- 7. CAMERA ANGLE KEYFRAME ANIMATION ---
     let keyframes = [];
     let currentTime = 0;
     let duration = 5;
@@ -728,7 +832,7 @@
       document.getElementById('play-btn').textContent = isPlaying ? '⏸ Pause' : '▶ Play';
     });
 
-    // --- 6. VIDEO EXPORT ---
+    // --- 8. VIDEO EXPORT ---
     document.getElementById('render-video-btn').addEventListener('click', () => {
       const btn = document.getElementById('render-video-btn');
       btn.textContent = '🔴 Rendering...';
@@ -761,7 +865,7 @@
       }, duration * 1000 + 100);
     });
 
-    // --- 7. RENDER LOOP ---
+    // --- 9. RENDER LOOP ---
     function animate(now) {
       requestAnimationFrame(animate);
       const dt = (now - lastFrameTime) / 1000;
