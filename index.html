@@ -110,8 +110,8 @@
   <div class="workspace">
     <div id="viewport-container">
       <div class="hud">
-        1. Upload photos from different angles (Front, Right, Back, Left, Top).<br>
-        2. Click <b>Build 3D Model from Angles</b> (Tripo AI if API key set, else local mesh).<br>
+        1. Paste Tripo API Key & Cloudflare Proxy URL.<br>
+        2. Upload angle photos & click <b>Build 3D Model from Angles</b>.<br>
         3. Orbit camera & add keyframes below to render video.
       </div>
     </div>
@@ -122,7 +122,10 @@
         <h2>1. Upload Different Angle Photos</h2>
 
         <label>Tripo API Key (Saved in Browser Only)</label>
-        <input type="password" id="tripo-api-key" placeholder="tsk_... (optional for Tripo AI)" />
+        <input type="password" id="tripo-api-key" placeholder="tsk_..." />
+
+        <label>CORS Proxy URL (Cloudflare Worker)</label>
+        <input type="text" id="proxy-url" placeholder="https://tripo-proxy.yourname.workers.dev" />
 
         <div id="angle-slots-container"></div>
 
@@ -140,7 +143,7 @@
 
         <button class="btn" id="reconstruct-btn">🔨 Build 3D Model from Angles</button>
         <div class="status-note" id="ai-status">
-          Tip: Add your Tripo API key above for Tripo Studio-style 3D mesh generation, or run without key for local mesh preview.
+          Enter Tripo API key + Proxy URL for exact Tripo 3D mesh generation.
         </div>
       </div>
 
@@ -283,13 +286,26 @@
     }
     initPlaceholder();
 
-    // --- 2. TRIPO API KEY PERSISTENCE ---
+    // --- 2. TRIPO API KEY & PROXY PERSISTENCE ---
     const apiKeyInput = document.getElementById('tripo-api-key');
+    const proxyUrlInput = document.getElementById('proxy-url');
     const aiStatusEl = document.getElementById('ai-status');
+
     apiKeyInput.value = localStorage.getItem('tripo_api_key') || '';
+    proxyUrlInput.value = localStorage.getItem('tripo_proxy_url') || '';
+
     apiKeyInput.addEventListener('input', () => {
       localStorage.setItem('tripo_api_key', apiKeyInput.value.trim());
     });
+    proxyUrlInput.addEventListener('input', () => {
+      localStorage.setItem('tripo_proxy_url', proxyUrlInput.value.trim());
+    });
+
+    function buildProxiedUrl(targetUrl) {
+      const proxy = proxyUrlInput.value.trim().replace(/\/+$/, '');
+      if (!proxy) return targetUrl;
+      return `${proxy}?url=${encodeURIComponent(targetUrl)}`;
+    }
 
     // --- 3. MULTI-ANGLE PHOTO SLOTS UI ---
     const defaultAngles = [
@@ -365,7 +381,7 @@
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch('https://api.tripo3d.ai/v2/openapi/upload', {
+      const res = await fetch(buildProxiedUrl('https://api.tripo3d.ai/v2/openapi/upload'), {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}` },
         body: formData
@@ -383,20 +399,26 @@
       for (const v of validViews) {
         if (v.file) {
           const token = await uploadImageToTripo(v.file, apiKey);
-          tokens.push(token);
+          tokens.push({ token, ext: (v.file.name.split('.').pop() || 'png').toLowerCase() });
         }
       }
 
       if (tokens.length === 0) throw new Error('No image files found');
 
-      // Use multiview_to_model when multiple views are uploaded, else image_to_model
+      // Tripo multiview_to_model expects up to 4 views (front, left, back, right)
       const isMulti = tokens.length > 1;
       const taskBody = isMulti
-        ? { type: 'multiview_to_model', files: tokens.map(t => ({ type: 'png', file_token: t })) }
-        : { type: 'image_to_model', file: { type: 'png', file_token: tokens[0] } };
+        ? {
+            type: 'multiview_to_model',
+            files: tokens.slice(0, 4).map(t => ({ type: t.ext === 'jpg' ? 'jpeg' : t.ext, file_token: t.token }))
+          }
+        : {
+            type: 'image_to_model',
+            file: { type: tokens[0].ext === 'jpg' ? 'jpeg' : tokens[0].ext, file_token: tokens[0].token }
+          };
 
       aiStatusEl.textContent = '🧠 Generating 3D mesh on Tripo Studio API...';
-      const createRes = await fetch('https://api.tripo3d.ai/v2/openapi/task', {
+      const createRes = await fetch(buildProxiedUrl('https://api.tripo3d.ai/v2/openapi/task'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -411,10 +433,9 @@
 
       const taskId = createJson.data.task_id;
 
-      // Poll until task completes
       while (true) {
         await new Promise(r => setTimeout(r, 2500));
-        const pollRes = await fetch(`https://api.tripo3d.ai/v2/openapi/task/${taskId}`, {
+        const pollRes = await fetch(buildProxiedUrl(`https://api.tripo3d.ai/v2/openapi/task/${taskId}`), {
           headers: { 'Authorization': `Bearer ${apiKey}` }
         });
         const pollJson = await pollRes.json();
@@ -432,8 +453,13 @@
 
           if (!modelUrl) throw new Error('Tripo completed but no .glb URL returned');
 
+          aiStatusEl.textContent = '⬇️ Downloading generated .GLB 3D model...';
+          const glbRes = await fetch(buildProxiedUrl(modelUrl));
+          if (!glbRes.ok) throw new Error('Failed to download .GLB file');
+          const glbBuffer = await glbRes.arrayBuffer();
+
           return new Promise((resolve, reject) => {
-            gltfLoader.load(modelUrl, (gltf) => resolve(gltf.scene), undefined, reject);
+            gltfLoader.parse(glbBuffer, '', (gltf) => resolve(gltf.scene), reject);
           });
         }
 
@@ -620,7 +646,7 @@
         } else {
           const localMesh = buildLocalVoxelMesh(validViews);
           setActive3DObject(localMesh);
-          aiStatusEl.textContent = 'ℹ️ Built via local fallback (add Tripo API key for Tripo Studio AI mesh).';
+          aiStatusEl.textContent = 'ℹ️ Built via local fallback (add Tripo API key + Proxy URL for Tripo AI mesh).';
         }
       } catch (err) {
         console.error(err);
