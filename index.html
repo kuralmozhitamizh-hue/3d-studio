@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Multi-View 3D Studio — Multi-Angle Photos to 3D & Video</title>
+  <title>MultiView 3D Studio — Multi-Angle Photos to 3D & Video</title>
   <style>
     :root {
       --bg: #0f1117;
@@ -128,9 +128,9 @@
 
         <label>3D Voxel Grid Resolution</label>
         <select id="voxel-res">
-          <option value="36">Fast Preview (36³)</option>
-          <option value="52" selected>Balanced Quality (52³)</option>
-          <option value="68">High Detail (68³)</option>
+          <option value="44">Fast Preview (44³)</option>
+          <option value="64" selected>Balanced Quality (64³)</option>
+          <option value="80">High Detail (80³)</option>
         </select>
 
         <button class="btn" id="reconstruct-btn">🔨 Build 3D Model from Angles</button>
@@ -182,42 +182,81 @@
     import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
     import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
-    // --- 1. THREE.JS VIEWPORT SETUP ---
+    // --- 1. THREE.JS VIEWPORT & PHYSICAL GROUND PLANE SETUP ---
+    const FLOOR_Y = -1.5;
     const container = document.getElementById('viewport-container');
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
-    camera.position.set(0, 1.2, 4.5);
+    camera.position.set(0, 0.4, 4.8);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.target.set(0, -0.2, 0);
 
-    scene.add(new THREE.AmbientLight(0xffffff, 1.1));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
-    keyLight.position.set(5, 8, 5);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    keyLight.position.set(4, 8, 5);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(1024, 1024);
     scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.7);
-    rimLight.position.set(-5, 3, -5);
+
+    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.75);
+    rimLight.position.set(-4, 3, -5);
     scene.add(rimLight);
 
+    // Physical floor contact surface (normal reaction force plane at FLOOR_Y)
+    const floorMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+    const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), floorMat);
+    floorMesh.rotation.x = -Math.PI / 2;
+    floorMesh.position.y = FLOOR_Y;
+    floorMesh.receiveShadow = true;
+    scene.add(floorMesh);
+
     const grid = new THREE.GridHelper(10, 20, 0x3b82f6, 0x222634);
-    grid.position.y = -1.5;
+    grid.position.y = FLOOR_Y;
     scene.add(grid);
 
     let activeModel = null;
     let isWireframe = false;
 
-    // Starter placeholder mesh
+    // Ground the model's lowest point cleanly onto FLOOR_Y (no floating or sinking)
+    function groundModelOnFloor() {
+      if (!activeModel) return;
+      activeModel.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(activeModel);
+      if (!box.isEmpty()) {
+        activeModel.position.y += (FLOOR_Y - box.min.y);
+        activeModel.updateMatrixWorld(true);
+      }
+    }
+
+    function applyModelTransforms() {
+      if (!activeModel) return;
+      const s = parseFloat(document.getElementById('scale-slider').value);
+      const sy = parseFloat(document.getElementById('stretchy-slider').value);
+      const ry = THREE.MathUtils.degToRad(parseFloat(document.getElementById('roty-slider').value));
+      activeModel.scale.set(s * 1.8, s * sy * 1.8, s * 1.8);
+      activeModel.rotation.y = ry;
+      groundModelOnFloor();
+    }
+
+    // Starter placeholder mesh resting on the floor
     function initPlaceholder() {
-      const geo = new THREE.BoxGeometry(1.5, 1.5, 1.5, 8, 8, 8);
+      const geo = new THREE.BoxGeometry(1.2, 1.2, 1.2, 8, 8, 8);
       const mat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.45, metalness: 0.15 });
       activeModel = new THREE.Mesh(geo, mat);
+      activeModel.castShadow = true;
+      activeModel.receiveShadow = true;
       scene.add(activeModel);
+      applyModelTransforms();
     }
     initPlaceholder();
 
@@ -230,11 +269,10 @@
       { label: 'Top View (Optional)', yaw: 0, pitch: 90 }
     ];
 
-    const angleViews = []; // Stores { yaw, pitch, image, canvasData }
+    const angleViews = [];
     const slotsContainer = document.getElementById('angle-slots-container');
 
     function createAngleSlot(preset = { label: 'Custom Angle', yaw: 45, pitch: 0 }) {
-      const index = angleViews.length;
       const viewObj = { yaw: preset.yaw, pitch: preset.pitch, image: null };
       angleViews.push(viewObj);
 
@@ -288,51 +326,60 @@
       document.getElementById('tol-val').textContent = e.target.value;
     });
 
-    // --- 3. MULTI-VIEW VISUAL HULL + MARCHING CUBES 3D RECONSTRUCTION ---
+    // --- 3. IMPROVED MULTI-VIEW VISUAL HULL + MARCHING CUBES RECONSTRUCTION ---
     function extractSilhouetteAndColors(img, size = 256, tolerance = 45) {
       const c = document.createElement('canvas');
       c.width = size;
       c.height = size;
       const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, size, size);
 
-      // Fit image centered preserving aspect ratio
       const scale = Math.min(size / img.width, size / img.height) * 0.88;
       const w = img.width * scale;
       const h = img.height * scale;
       const ox = (size - w) / 2;
       const oy = (size - h) / 2;
 
-      // Sample corner pixel as background color reference
-      const tempC = document.createElement('canvas');
-      tempC.width = 16; tempC.height = 16;
-      const tempCtx = tempC.getContext('2d');
-      tempCtx.drawImage(img, 0, 0, 16, 16);
-      const cornerData = tempCtx.getImageData(0, 0, 16, 16).data;
-
-      // Average the 4 corners for background color
-      const corners = [0, (15) * 4, (15 * 16) * 4, (16 * 16 - 1) * 4];
-      let bgR = 0, bgG = 0, bgB = 0;
-      corners.forEach(idx => {
-        bgR += cornerData[idx];
-        bgG += cornerData[idx + 1];
-        bgB += cornerData[idx + 2];
-      });
-      bgR /= 4; bgG /= 4; bgB /= 4;
-
-      ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
-      ctx.fillRect(0, 0, size, size);
       ctx.drawImage(img, ox, oy, w, h);
-
       const pixels = ctx.getImageData(0, 0, size, size).data;
-      const mask = new Uint8Array(size * size);
 
+      // Detect if image has meaningful transparency (e.g. PNG cutouts)
+      let transparentCount = 0;
+      for (let i = 3; i < pixels.length; i += 4) {
+        if (pixels[i] < 32) transparentCount++;
+      }
+      const hasAlphaCutout = transparentCount > (size * size * 0.05);
+
+      // Sample border pixels for solid background color fallback
+      let bgR = 0, bgG = 0, bgB = 0, bgSamples = 0;
+      for (let x = 0; x < size; x += 8) {
+        for (const y of [2, size - 3]) {
+          const p = (y * size + x) * 4;
+          if (pixels[p + 3] > 200) {
+            bgR += pixels[p]; bgG += pixels[p + 1]; bgB += pixels[p + 2];
+            bgSamples++;
+          }
+        }
+      }
+      if (bgSamples > 0) { bgR /= bgSamples; bgG /= bgSamples; bgB /= bgSamples; }
+
+      const mask = new Uint8Array(size * size);
       for (let i = 0; i < size * size; i++) {
         const p = i * 4;
-        const dr = pixels[p] - bgR;
-        const dg = pixels[p + 1] - bgG;
-        const db = pixels[p + 2] - bgB;
-        const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-        mask[i] = dist > tolerance ? 1 : 0;
+        const a = pixels[p + 3];
+        if (hasAlphaCutout) {
+          mask[i] = a > 90 ? 1 : 0;
+        } else {
+          if (a < 30) {
+            mask[i] = 0;
+          } else {
+            const dr = pixels[p] - bgR;
+            const dg = pixels[p + 1] - bgG;
+            const db = pixels[p + 2] - bgB;
+            const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+            mask[i] = dist > tolerance ? 1 : 0;
+          }
+        }
       }
 
       return { mask, pixels, size };
@@ -353,20 +400,18 @@
         const gridRes = parseInt(document.getElementById('voxel-res').value);
         const texSize = 256;
 
-        // Preprocess each uploaded angle photo
         const processedViews = validViews.map(v => {
           const { mask, pixels, size } = extractSilhouetteAndColors(v.image, texSize, tolerance);
           const yawRad = THREE.MathUtils.degToRad(v.yaw);
           const pitchRad = THREE.MathUtils.degToRad(v.pitch);
 
-          // Camera viewing direction unit vector for this photo angle
+          // Standard right-handed camera direction: yaw=0 -> +Z, yaw=90 -> +X
           const camDir = new THREE.Vector3(
             Math.sin(yawRad) * Math.cos(pitchRad),
             Math.sin(pitchRad),
             Math.cos(yawRad) * Math.cos(pitchRad)
           ).normalize();
 
-          // Local camera Right and Up axes for orthographic projection
           const worldUp = Math.abs(v.pitch) > 85 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
           const right = new THREE.Vector3().crossVectors(worldUp, camDir).normalize();
           const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
@@ -374,28 +419,27 @@
           return { mask, pixels, size, camDir, right, up };
         });
 
-        // Build Marching Cubes Voxel Field
+        // MarchingCubes uses an internal border margin of 1 voxel on each side
         const mc = new MarchingCubes(gridRes, new THREE.MeshStandardMaterial({
           vertexColors: true,
           roughness: 0.55,
-          metalness: 0.1
-        }), false, true, 120000);
+          metalness: 0.08
+        }), false, true, 200000);
 
-        mc.isolation = 0.5;
+        mc.isolation = 25;
         mc.reset();
 
         const pVec = new THREE.Vector3();
 
-        // Carve 3D Space: A voxel survives ONLY if it lies inside the silhouette of ALL uploaded angles
-        for (let z = 0; z < gridRes; z++) {
-          const nz = (z / (gridRes - 1)) * 2 - 1; // [-1, 1]
-          for (let y = 0; y < gridRes; y++) {
-            const ny = (y / (gridRes - 1)) * 2 - 1;
-            for (let x = 0; x < gridRes; x++) {
-              const nx = (x / (gridRes - 1)) * 2 - 1;
+        for (let z = 1; z < gridRes - 1; z++) {
+          const nz = ((z - 1) / (gridRes - 3)) * 2 - 1;
+          for (let y = 1; y < gridRes - 1; y++) {
+            const ny = ((y - 1) / (gridRes - 3)) * 2 - 1;
+            for (let x = 1; x < gridRes - 1; x++) {
+              const nx = ((x - 1) / (gridRes - 3)) * 2 - 1;
               pVec.set(nx, ny, nz);
 
-              let insideAllViews = true;
+              let insideCount = 0;
               for (let v = 0; v < processedViews.length; v++) {
                 const view = processedViews[v];
                 const u = pVec.dot(view.right);
@@ -404,28 +448,24 @@
                 const px = Math.floor(((u + 1) * 0.5) * (texSize - 1));
                 const py = Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1));
 
-                if (px < 0 || px >= texSize || py < 0 || py >= texSize) {
-                  insideAllViews = false;
-                  break;
-                }
-                if (view.mask[py * texSize + px] === 0) {
-                  insideAllViews = false;
-                  break;
+                if (px >= 0 && px < texSize && py >= 0 && py < texSize && view.mask[py * texSize + px] === 1) {
+                  insideCount++;
                 }
               }
 
+              // Require full visual hull intersection across all uploaded angles
+              const isInside = insideCount === processedViews.length;
               const idx = x + y * gridRes + z * gridRes * gridRes;
-              mc.field[idx] = insideAllViews ? 1.0 : 0.0;
+              mc.field[idx] = isInside ? 60.0 : -10.0;
             }
           }
         }
 
-        // Generate clean BufferGeometry from carved voxel volume
         mc.update();
         const rawGeo = mc.geometry.clone();
         rawGeo.computeVertexNormals();
 
-        // Project real photo colors onto every 3D vertex based on surface normal facing angle
+        // Project clean photo colors onto vertices with angular normal weighting
         const posAttr = rawGeo.attributes.position;
         const normAttr = rawGeo.attributes.normal;
         const colors = new Float32Array(posAttr.count * 3);
@@ -442,12 +482,16 @@
 
           for (let v = 0; v < processedViews.length; v++) {
             const view = processedViews[v];
-            // Weight contribution by how directly the surface faces that photo's camera angle
             const alignment = Math.max(0, vNorm.dot(view.camDir));
-            const weight = Math.pow(alignment, 3) + 0.01;
+            const weight = Math.pow(alignment, 4) + 0.005;
 
-            const u = vPos.dot(view.right);
-            const w = vPos.dot(view.up);
+            const u = THREE.MathUtils.clamp(vPos.x, -1, 1) * view.right.x +
+                      THREE.MathUtils.clamp(vPos.y, -1, 1) * view.right.y +
+                      THREE.MathUtils.clamp(vPos.z, -1, 1) * view.right.z;
+            const w = THREE.MathUtils.clamp(vPos.x, -1, 1) * view.up.x +
+                      THREE.MathUtils.clamp(vPos.y, -1, 1) * view.up.y +
+                      THREE.MathUtils.clamp(vPos.z, -1, 1) * view.up.z;
+
             const px = THREE.MathUtils.clamp(Math.floor(((u + 1) * 0.5) * (texSize - 1)), 0, texSize - 1);
             const py = THREE.MathUtils.clamp(Math.floor(((1 - (w + 1) * 0.5)) * (texSize - 1)), 0, texSize - 1);
 
@@ -468,14 +512,24 @@
         if (activeModel) scene.remove(activeModel);
         const mat = new THREE.MeshStandardMaterial({
           vertexColors: true,
-          roughness: 0.55,
+          roughness: 0.5,
           metalness: 0.08,
           wireframe: isWireframe
         });
 
         activeModel = new THREE.Mesh(rawGeo, mat);
-        activeModel.scale.setScalar(1.6);
+        activeModel.castShadow = true;
+        activeModel.receiveShadow = true;
         scene.add(activeModel);
+
+        // Reset transform sliders and ground cleanly on floor
+        document.getElementById('scale-slider').value = 1;
+        document.getElementById('scale-val').textContent = '1.0';
+        document.getElementById('stretchy-slider').value = 1;
+        document.getElementById('stretchy-val').textContent = '1.0';
+        document.getElementById('roty-slider').value = 0;
+        document.getElementById('roty-val').textContent = '0°';
+        applyModelTransforms();
 
         btn.textContent = '🔨 Build 3D Model from Angles';
       }, 40);
@@ -483,22 +537,18 @@
 
     // --- 4. MODEL EDITING & SMOOTHING ---
     document.getElementById('scale-slider').addEventListener('input', (e) => {
-      const s = parseFloat(e.target.value);
-      const sy = parseFloat(document.getElementById('stretchy-slider').value);
-      document.getElementById('scale-val').textContent = s.toFixed(1);
-      if (activeModel) activeModel.scale.set(s * 1.6, s * sy * 1.6, s * 1.6);
+      document.getElementById('scale-val').textContent = parseFloat(e.target.value).toFixed(1);
+      applyModelTransforms();
     });
 
     document.getElementById('stretchy-slider').addEventListener('input', (e) => {
-      const sy = parseFloat(e.target.value);
-      const s = parseFloat(document.getElementById('scale-slider').value);
-      document.getElementById('stretchy-val').textContent = sy.toFixed(2);
-      if (activeModel) activeModel.scale.set(s * 1.6, s * sy * 1.6, s * 1.6);
+      document.getElementById('stretchy-val').textContent = parseFloat(e.target.value).toFixed(2);
+      applyModelTransforms();
     });
 
     document.getElementById('roty-slider').addEventListener('input', (e) => {
       document.getElementById('roty-val').textContent = e.target.value + '°';
-      if (activeModel) activeModel.rotation.y = THREE.MathUtils.degToRad(parseFloat(e.target.value));
+      applyModelTransforms();
     });
 
     document.getElementById('toggle-wireframe').addEventListener('click', () => {
@@ -506,21 +556,18 @@
       if (activeModel?.material) activeModel.material.wireframe = isWireframe;
     });
 
-    // Vertex averaging filter to remove voxel stair-stepping
     document.getElementById('smooth-mesh-btn').addEventListener('click', () => {
       if (!activeModel?.geometry) return;
       const geo = activeModel.geometry;
       const pos = geo.attributes.position;
       const map = new Map();
 
-      // Group coincident triangle vertices
       for (let i = 0; i < pos.count; i++) {
         const key = `${pos.getX(i).toFixed(4)}_${pos.getY(i).toFixed(4)}_${pos.getZ(i).toFixed(4)}`;
         if (!map.has(key)) map.set(key, []);
         map.get(key).push(i);
       }
 
-      // Build adjacency and smooth
       const neighbors = Array.from({ length: pos.count }, () => []);
       for (let i = 0; i < pos.count; i += 3) {
         const tri = [i, i + 1, i + 2];
@@ -556,9 +603,9 @@
       pos.array.set(newPos);
       pos.needsUpdate = true;
       geo.computeVertexNormals();
+      groundModelOnFloor();
     });
 
-    // Export reconstructed 3D model as .GLB
     document.getElementById('export-glb-btn').addEventListener('click', () => {
       if (!activeModel) return;
       const exporter = new GLTFExporter();
@@ -572,8 +619,8 @@
     });
 
     document.getElementById('reset-cam-btn').addEventListener('click', () => {
-      camera.position.set(0, 1.2, 4.5);
-      controls.target.set(0, 0, 0);
+      camera.position.set(0, 0.4, 4.8);
+      controls.target.set(0, -0.2, 0);
       controls.update();
     });
 
