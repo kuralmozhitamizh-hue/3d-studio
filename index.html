@@ -91,7 +91,8 @@
     {
       "imports": {
         "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+        "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
+        "@gradio/client": "https://esm.sh/@gradio/client@1.6.0"
       }
     }
   </script>
@@ -127,9 +128,6 @@
         <label>Hugging Face Token (Saved in Browser Only)</label>
         <input type="password" id="hf-token" placeholder="hf_... (optional)" />
 
-        <label>CORS Proxy URL (Optional Cloudflare Worker)</label>
-        <input type="text" id="proxy-url" placeholder="https://tripo-proxy.yourname.workers.dev" />
-
         <div id="angle-slots-container"></div>
 
         <button class="btn btn-secondary" id="add-angle-btn" style="margin-bottom:10px;">+ Add Custom Angle Photo</button>
@@ -146,7 +144,7 @@
 
         <button class="btn" id="reconstruct-btn">🔨 Build 3D Model from Angles</button>
         <div class="status-note" id="ai-status">
-          Uses Hugging Face Space Gradio API to generate a .GLB 3D model from your uploaded photo(s).
+          Connects to Hugging Face Space using @gradio/client to build a .GLB 3D model.
         </div>
       </div>
 
@@ -196,6 +194,7 @@
     import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
     import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+    import { Client } from '@gradio/client';
 
     // --- 1. THREE.JS VIEWPORT & PHYSICAL GROUND PLANE SETUP ---
     const FLOOR_Y = -1.5;
@@ -292,28 +291,13 @@
     // --- 2. HUGGING FACE CONFIG PERSISTENCE ---
     const spaceInput = document.getElementById('hf-space-id');
     const tokenInput = document.getElementById('hf-token');
-    const proxyUrlInput = document.getElementById('proxy-url');
     const aiStatusEl = document.getElementById('ai-status');
 
     spaceInput.value = localStorage.getItem('hf_space_id') || 'JeffreyXiang/TRELLIS';
     tokenInput.value = localStorage.getItem('hf_token') || '';
-    proxyUrlInput.value = localStorage.getItem('hf_proxy_url') || '';
 
     spaceInput.addEventListener('input', () => localStorage.setItem('hf_space_id', spaceInput.value.trim()));
     tokenInput.addEventListener('input', () => localStorage.setItem('hf_token', tokenInput.value.trim()));
-    proxyUrlInput.addEventListener('input', () => localStorage.setItem('hf_proxy_url', proxyUrlInput.value.trim()));
-
-    function buildProxiedUrl(targetUrl) {
-      const proxy = proxyUrlInput.value.trim().replace(/\/+$/, '');
-      if (!proxy) return targetUrl;
-      return `${proxy}?url=${encodeURIComponent(targetUrl)}`;
-    }
-
-    function getSpaceHost(spaceId) {
-      const clean = spaceId.trim().replace(/^https?:\/\/huggingface\.co\/spaces\//i, '').replace(/\/+$/, '');
-      const slug = clean.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
-      return `https://${slug}.hf.space`;
-    }
 
     // --- 3. MULTI-ANGLE PHOTO SLOTS UI ---
     const defaultAngles = [
@@ -382,124 +366,72 @@
       document.getElementById('tol-val').textContent = e.target.value;
     });
 
-    // --- 4. HUGGING FACE GRADIO 3D RECONSTRUCTION PIPELINE ---
+    // --- 4. GRADIO CLIENT 3D RECONSTRUCTION PIPELINE ---
     const gltfLoader = new GLTFLoader();
 
-    function fileToDataUrl(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
-    function findGlbUrlInPayload(obj, host) {
-      if (!obj) return null;
-      if (typeof obj === 'string') {
-        if (obj.toLowerCase().includes('.glb')) {
-          return obj.startsWith('http') ? obj : `${host}/file=${obj.replace(/^\/file=/, '')}`;
+    function extractGlbUrl(resultData) {
+      const search = (val) => {
+        if (!val) return null;
+        if (typeof val === 'string') {
+          return val.toLowerCase().includes('.glb') ? val : null;
+        }
+        if (Array.isArray(val)) {
+          for (const item of val) {
+            const found = search(item);
+            if (found) return found;
+          }
+          return null;
+        }
+        if (typeof val === 'object') {
+          if (typeof val.url === 'string' && val.url.toLowerCase().includes('.glb')) return val.url;
+          for (const k of Object.keys(val)) {
+            const found = search(val[k]);
+            if (found) return found;
+          }
         }
         return null;
-      }
-      if (Array.isArray(obj)) {
-        for (const item of obj) {
-          const found = findGlbUrlInPayload(item, host);
-          if (found) return found;
-        }
-        return null;
-      }
-      if (typeof obj === 'object') {
-        if (typeof obj.url === 'string' && obj.url.toLowerCase().includes('.glb')) {
-          return obj.url.startsWith('http') ? obj.url : `${host}${obj.url.startsWith('/') ? '' : '/'}${obj.url}`;
-        }
-        if (typeof obj.path === 'string' && obj.path.toLowerCase().includes('.glb')) {
-          return `${host}/gradio_api/file=${obj.path}`;
-        }
-        for (const key of Object.keys(obj)) {
-          const found = findGlbUrlInPayload(obj[key], host);
-          if (found) return found;
-        }
-      }
-      return null;
+      };
+      return search(resultData);
     }
 
-    async function generateWithHuggingFace(validViews, spaceId, token) {
-      const host = getSpaceHost(spaceId);
-      const primaryView = validViews[0];
-      const dataUrl = await fileToDataUrl(primaryView.file);
+    async function generateWithGradioClient(validViews, spaceId, token) {
+      aiStatusEl.textContent = `🔌 Connecting to Space ${spaceId}...`;
+      const clientOpts = token ? { hf_token: token } : {};
+      const client = await Client.connect(spaceId, clientOpts);
 
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const apiInfo = await client.view_api();
+      const endpoints = Object.keys(apiInfo?.named_endpoints || {});
+      const targetEndpoint =
+        endpoints.find(ep => ep.toLowerCase().includes('generate') || ep.toLowerCase().includes('glb') || ep.toLowerCase().includes('3d')) ||
+        endpoints[0];
 
-      aiStatusEl.textContent = `⬆️ Submitting image to ${spaceId}...`;
+      if (!targetEndpoint) {
+        throw new Error('No runnable endpoint found on this Space');
+      }
 
-      // Gradio v4/v5 queue call
-      const sessionHash = Math.random().toString(36).substring(2, 12);
-      const joinUrl = buildProxiedUrl(`${host}/gradio_api/queue/join`);
-
-      const joinRes = await fetch(joinUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          data: [{ path: null, url: dataUrl, orig_name: primaryView.file.name || 'image.png' }],
-          event_id: null,
-          fn_index: 0,
-          session_hash: sessionHash
-        })
+      const epDef = apiInfo.named_endpoints[targetEndpoint];
+      const args = (epDef?.parameters || []).map((param, idx) => {
+        const typeStr = JSON.stringify(param?.type || param?.component || '').toLowerCase();
+        if (typeStr.includes('image') || typeStr.includes('file') || idx === 0) {
+          return validViews[0].file;
+        }
+        if (typeof param?.parameter_default !== 'undefined') {
+          return param.parameter_default;
+        }
+        return null;
       });
 
-      if (!joinRes.ok) {
-        throw new Error(`HF Space request failed (${joinRes.status})`);
-      }
-
-      const streamUrl = buildProxiedUrl(`${host}/gradio_api/queue/data?session_hash=${sessionHash}`);
-      const streamRes = await fetch(streamUrl, { headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
-      if (!streamRes.ok || !streamRes.body) {
-        throw new Error('Failed to read HF Space progress stream');
-      }
-
-      const reader = streamRes.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let glbUrl = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue;
-          const raw = line.slice(5).trim();
-          if (!raw) continue;
-          try {
-            const evt = JSON.parse(raw);
-            if (evt.msg === 'estimation' || evt.msg === 'process_starts') {
-              aiStatusEl.textContent = `⚙️ ${spaceId} processing 3D model...`;
-            } else if (evt.msg === 'process_completed') {
-              glbUrl = findGlbUrlInPayload(evt.output?.data, host);
-            }
-          } catch (_) {}
-        }
-        if (glbUrl) break;
-      }
+      aiStatusEl.textContent = `⚙️ Generating 3D model via ${targetEndpoint}...`;
+      const prediction = await client.predict(targetEndpoint, args);
+      const glbUrl = extractGlbUrl(prediction?.data);
 
       if (!glbUrl) {
-        throw new Error('HF Space finished without returning a .GLB mesh');
+        throw new Error('Space returned output without a .GLB file');
       }
 
-      aiStatusEl.textContent = '⬇️ Downloading generated .GLB 3D model...';
-      const glbRes = await fetch(buildProxiedUrl(glbUrl), {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      if (!glbRes.ok) throw new Error('Failed to download .GLB from HF Space');
-      const glbBuffer = await glbRes.arrayBuffer();
-
+      aiStatusEl.textContent = '⬇️ Loading generated .GLB 3D model...';
       return new Promise((resolve, reject) => {
-        gltfLoader.parse(glbBuffer, '', (gltf) => resolve(gltf.scene), reject);
+        gltfLoader.load(glbUrl, (gltf) => resolve(gltf.scene), undefined, reject);
       });
     }
 
@@ -675,7 +607,7 @@
 
       try {
         if (spaceId) {
-          const aiMesh = await generateWithHuggingFace(validViews, spaceId, token);
+          const aiMesh = await generateWithGradioClient(validViews, spaceId, token);
           setActive3DObject(aiMesh);
           aiStatusEl.textContent = `✅ 3D model from ${spaceId} loaded and grounded!`;
         } else {
