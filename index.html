@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MultiView 3D Studio — Tripo AI & Camera Animator</title>
+  <title>MultiView 3D Studio — Hugging Face 3D AI & Camera Animator</title>
   <style>
     :root {
       --bg: #0f1117;
@@ -110,21 +110,24 @@
   <div class="workspace">
     <div id="viewport-container">
       <div class="hud">
-        1. Paste Tripo API Key & Cloudflare Proxy URL.<br>
+        1. Set Hugging Face Space & Token (optional).<br>
         2. Upload angle photos & click <b>Build 3D Model from Angles</b>.<br>
         3. Orbit camera & add keyframes below to render video.
       </div>
     </div>
 
     <aside>
-      <!-- Section 1: Multi-Angle Photos Input & Tripo AI -->
+      <!-- Section 1: Multi-Angle Photos Input & Hugging Face 3D AI -->
       <div class="section">
         <h2>1. Upload Different Angle Photos</h2>
 
-        <label>Tripo API Key (Saved in Browser Only)</label>
-        <input type="password" id="tripo-api-key" placeholder="tsk_..." />
+        <label>Hugging Face Space ID</label>
+        <input type="text" id="hf-space-id" placeholder="JeffreyXiang/TRELLIS" />
 
-        <label>CORS Proxy URL (Cloudflare Worker)</label>
+        <label>Hugging Face Token (Saved in Browser Only)</label>
+        <input type="password" id="hf-token" placeholder="hf_... (optional)" />
+
+        <label>CORS Proxy URL (Optional Cloudflare Worker)</label>
         <input type="text" id="proxy-url" placeholder="https://tripo-proxy.yourname.workers.dev" />
 
         <div id="angle-slots-container"></div>
@@ -143,7 +146,7 @@
 
         <button class="btn" id="reconstruct-btn">🔨 Build 3D Model from Angles</button>
         <div class="status-note" id="ai-status">
-          Enter Tripo API key + Proxy URL for exact Tripo 3D mesh generation.
+          Uses Hugging Face Space Gradio API to generate a .GLB 3D model from your uploaded photo(s).
         </div>
       </div>
 
@@ -286,25 +289,30 @@
     }
     initPlaceholder();
 
-    // --- 2. TRIPO API KEY & PROXY PERSISTENCE ---
-    const apiKeyInput = document.getElementById('tripo-api-key');
+    // --- 2. HUGGING FACE CONFIG PERSISTENCE ---
+    const spaceInput = document.getElementById('hf-space-id');
+    const tokenInput = document.getElementById('hf-token');
     const proxyUrlInput = document.getElementById('proxy-url');
     const aiStatusEl = document.getElementById('ai-status');
 
-    apiKeyInput.value = localStorage.getItem('tripo_api_key') || '';
-    proxyUrlInput.value = localStorage.getItem('tripo_proxy_url') || '';
+    spaceInput.value = localStorage.getItem('hf_space_id') || 'JeffreyXiang/TRELLIS';
+    tokenInput.value = localStorage.getItem('hf_token') || '';
+    proxyUrlInput.value = localStorage.getItem('hf_proxy_url') || '';
 
-    apiKeyInput.addEventListener('input', () => {
-      localStorage.setItem('tripo_api_key', apiKeyInput.value.trim());
-    });
-    proxyUrlInput.addEventListener('input', () => {
-      localStorage.setItem('tripo_proxy_url', proxyUrlInput.value.trim());
-    });
+    spaceInput.addEventListener('input', () => localStorage.setItem('hf_space_id', spaceInput.value.trim()));
+    tokenInput.addEventListener('input', () => localStorage.setItem('hf_token', tokenInput.value.trim()));
+    proxyUrlInput.addEventListener('input', () => localStorage.setItem('hf_proxy_url', proxyUrlInput.value.trim()));
 
     function buildProxiedUrl(targetUrl) {
       const proxy = proxyUrlInput.value.trim().replace(/\/+$/, '');
       if (!proxy) return targetUrl;
       return `${proxy}?url=${encodeURIComponent(targetUrl)}`;
+    }
+
+    function getSpaceHost(spaceId) {
+      const clean = spaceId.trim().replace(/^https?:\/\/huggingface\.co\/spaces\//i, '').replace(/\/+$/, '');
+      const slug = clean.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+      return `https://${slug}.hf.space`;
     }
 
     // --- 3. MULTI-ANGLE PHOTO SLOTS UI ---
@@ -374,99 +382,125 @@
       document.getElementById('tol-val').textContent = e.target.value;
     });
 
-    // --- 4. TRIPO AI MULTI-VIEW / IMAGE-TO-3D PIPELINE ---
+    // --- 4. HUGGING FACE GRADIO 3D RECONSTRUCTION PIPELINE ---
     const gltfLoader = new GLTFLoader();
 
-    async function uploadImageToTripo(file, apiKey) {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const res = await fetch(buildProxiedUrl('https://api.tripo3d.ai/v2/openapi/upload'), {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}` },
-        body: formData
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
       });
-      const json = await res.json();
-      if (!res.ok || json.code !== 0) {
-        throw new Error(json.message || 'Tripo image upload failed');
-      }
-      return json.data.image_token;
     }
 
-    async function generateWithTripo(validViews, apiKey) {
-      aiStatusEl.textContent = '⬆️ Uploading angle photos to Tripo...';
-      const tokens = [];
-      for (const v of validViews) {
-        if (v.file) {
-          const token = await uploadImageToTripo(v.file, apiKey);
-          tokens.push({ token, ext: (v.file.name.split('.').pop() || 'png').toLowerCase() });
+    function findGlbUrlInPayload(obj, host) {
+      if (!obj) return null;
+      if (typeof obj === 'string') {
+        if (obj.toLowerCase().includes('.glb')) {
+          return obj.startsWith('http') ? obj : `${host}/file=${obj.replace(/^\/file=/, '')}`;
+        }
+        return null;
+      }
+      if (Array.isArray(obj)) {
+        for (const item of obj) {
+          const found = findGlbUrlInPayload(item, host);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (typeof obj === 'object') {
+        if (typeof obj.url === 'string' && obj.url.toLowerCase().includes('.glb')) {
+          return obj.url.startsWith('http') ? obj.url : `${host}${obj.url.startsWith('/') ? '' : '/'}${obj.url}`;
+        }
+        if (typeof obj.path === 'string' && obj.path.toLowerCase().includes('.glb')) {
+          return `${host}/gradio_api/file=${obj.path}`;
+        }
+        for (const key of Object.keys(obj)) {
+          const found = findGlbUrlInPayload(obj[key], host);
+          if (found) return found;
         }
       }
+      return null;
+    }
 
-      if (tokens.length === 0) throw new Error('No image files found');
+    async function generateWithHuggingFace(validViews, spaceId, token) {
+      const host = getSpaceHost(spaceId);
+      const primaryView = validViews[0];
+      const dataUrl = await fileToDataUrl(primaryView.file);
 
-      // Tripo multiview_to_model expects up to 4 views (front, left, back, right)
-      const isMulti = tokens.length > 1;
-      const taskBody = isMulti
-        ? {
-            type: 'multiview_to_model',
-            files: tokens.slice(0, 4).map(t => ({ type: t.ext === 'jpg' ? 'jpeg' : t.ext, file_token: t.token }))
-          }
-        : {
-            type: 'image_to_model',
-            file: { type: tokens[0].ext === 'jpg' ? 'jpeg' : tokens[0].ext, file_token: tokens[0].token }
-          };
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      aiStatusEl.textContent = '🧠 Generating 3D mesh on Tripo Studio API...';
-      const createRes = await fetch(buildProxiedUrl('https://api.tripo3d.ai/v2/openapi/task'), {
+      aiStatusEl.textContent = `⬆️ Submitting image to ${spaceId}...`;
+
+      // Gradio v4/v5 queue call
+      const sessionHash = Math.random().toString(36).substring(2, 12);
+      const joinUrl = buildProxiedUrl(`${host}/gradio_api/queue/join`);
+
+      const joinRes = await fetch(joinUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(taskBody)
+        headers,
+        body: JSON.stringify({
+          data: [{ path: null, url: dataUrl, orig_name: primaryView.file.name || 'image.png' }],
+          event_id: null,
+          fn_index: 0,
+          session_hash: sessionHash
+        })
       });
-      const createJson = await createRes.json();
-      if (!createRes.ok || createJson.code !== 0) {
-        throw new Error(createJson.message || 'Tripo task creation failed');
+
+      if (!joinRes.ok) {
+        throw new Error(`HF Space request failed (${joinRes.status})`);
       }
 
-      const taskId = createJson.data.task_id;
+      const streamUrl = buildProxiedUrl(`${host}/gradio_api/queue/data?session_hash=${sessionHash}`);
+      const streamRes = await fetch(streamUrl, { headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
+      if (!streamRes.ok || !streamRes.body) {
+        throw new Error('Failed to read HF Space progress stream');
+      }
+
+      const reader = streamRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let glbUrl = null;
 
       while (true) {
-        await new Promise(r => setTimeout(r, 2500));
-        const pollRes = await fetch(buildProxiedUrl(`https://api.tripo3d.ai/v2/openapi/task/${taskId}`), {
-          headers: { 'Authorization': `Bearer ${apiKey}` }
-        });
-        const pollJson = await pollRes.json();
-        const status = pollJson?.data?.status;
-        const progress = pollJson?.data?.progress ?? 0;
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        aiStatusEl.textContent = `⚙️ Tripo 3D Status: ${status} (${progress}%)`;
-
-        if (status === 'success') {
-          const modelUrl =
-            pollJson.data.output?.pbr_model ||
-            pollJson.data.output?.model ||
-            pollJson.data.result?.pbr_model?.url ||
-            pollJson.data.result?.model?.url;
-
-          if (!modelUrl) throw new Error('Tripo completed but no .glb URL returned');
-
-          aiStatusEl.textContent = '⬇️ Downloading generated .GLB 3D model...';
-          const glbRes = await fetch(buildProxiedUrl(modelUrl));
-          if (!glbRes.ok) throw new Error('Failed to download .GLB file');
-          const glbBuffer = await glbRes.arrayBuffer();
-
-          return new Promise((resolve, reject) => {
-            gltfLoader.parse(glbBuffer, '', (gltf) => resolve(gltf.scene), reject);
-          });
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const raw = line.slice(5).trim();
+          if (!raw) continue;
+          try {
+            const evt = JSON.parse(raw);
+            if (evt.msg === 'estimation' || evt.msg === 'process_starts') {
+              aiStatusEl.textContent = `⚙️ ${spaceId} processing 3D model...`;
+            } else if (evt.msg === 'process_completed') {
+              glbUrl = findGlbUrlInPayload(evt.output?.data, host);
+            }
+          } catch (_) {}
         }
-
-        if (status === 'failed' || status === 'cancelled' || status === 'unknown') {
-          throw new Error(`Tripo 3D task ${status}`);
-        }
+        if (glbUrl) break;
       }
+
+      if (!glbUrl) {
+        throw new Error('HF Space finished without returning a .GLB mesh');
+      }
+
+      aiStatusEl.textContent = '⬇️ Downloading generated .GLB 3D model...';
+      const glbRes = await fetch(buildProxiedUrl(glbUrl), {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!glbRes.ok) throw new Error('Failed to download .GLB from HF Space');
+      const glbBuffer = await glbRes.arrayBuffer();
+
+      return new Promise((resolve, reject) => {
+        gltfLoader.parse(glbBuffer, '', (gltf) => resolve(gltf.scene), reject);
+      });
     }
 
     // --- 5. LOCAL FALLBACK VISUAL HULL + MARCHING CUBES ---
@@ -626,7 +660,7 @@
     }
 
     document.getElementById('reconstruct-btn').addEventListener('click', async () => {
-      const validViews = angleViews.filter(v => v.image !== null);
+      const validViews = angleViews.filter(v => v.image !== null && v.file !== null);
       if (validViews.length === 0) {
         alert('Please upload at least 1 or more angle photos first!');
         return;
@@ -636,17 +670,18 @@
       btn.disabled = true;
       btn.textContent = '⏳ Building 3D Model...';
 
-      const apiKey = apiKeyInput.value.trim();
+      const spaceId = spaceInput.value.trim();
+      const token = tokenInput.value.trim();
 
       try {
-        if (apiKey) {
-          const tripoMesh = await generateWithTripo(validViews, apiKey);
-          setActive3DObject(tripoMesh);
-          aiStatusEl.textContent = '✅ Tripo 3D model loaded and grounded!';
+        if (spaceId) {
+          const aiMesh = await generateWithHuggingFace(validViews, spaceId, token);
+          setActive3DObject(aiMesh);
+          aiStatusEl.textContent = `✅ 3D model from ${spaceId} loaded and grounded!`;
         } else {
           const localMesh = buildLocalVoxelMesh(validViews);
           setActive3DObject(localMesh);
-          aiStatusEl.textContent = 'ℹ️ Built via local fallback (add Tripo API key + Proxy URL for Tripo AI mesh).';
+          aiStatusEl.textContent = 'ℹ️ Built via local fallback (set Hugging Face Space ID for AI 3D mesh).';
         }
       } catch (err) {
         console.error(err);
